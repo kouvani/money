@@ -822,8 +822,13 @@ function mapSlashCsv(st, text){
     dateLocal: utcToLocalISO(r[ci.date]), authLocal: ci.auth >= 0 ? utcToLocalISO(r[ci.auth]) : null,
     status: ci.status >= 0 ? (r[ci.status] || "").toLowerCase() : "settled", decline: ci.decline >= 0 ? (r[ci.decline] || "") : "",
   })).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0 && !x.decline && x.status !== "declined");
-  // opposite rows of the same amount from the same counterparty cancel out
+  return planFromRecords(st, recs);
+}
+
+// Shared planner for CSV rows and live API items (same record shape).
+function planFromRecords(st, recs){
   let pairs = 0;
+  // opposite rows of the same amount from the same counterparty cancel out
   const dropped = new Set();
   for (const a of recs) {
     if (dropped.has(a.id)) continue;
@@ -878,6 +883,66 @@ function deleteMonth(st, ym){
   st.items = st.items.filter(x => !x.date.startsWith(ym));
   for (const d of Object.keys(st.adjust || {})) if (d.startsWith(ym)) delete st.adjust[d];
   return before - st.items.length;
+}
+
+// "2026-08-30T02:07:42.000Z" -> the date it was in this machine's timezone
+function isoToLocalISO(iso){
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Live Slash API transactions -> the importer's record shape
+function recsFromSlashApi(items){
+  return (items || []).map(t => {
+    const cat = t.category || (t.cardId ? "card" : (t.achInfo ? "ach" : (t.feeInfo ? "fee" : "")));
+    const ds = String(t.detailedStatus || "").toLowerCase();
+    const status = ds === "settled" || ds === "refund" || ds === "reversed" || ds === "returned" ? "settled"
+                 : (t.status === "pending" || ds === "pending" || ds === "pending_approval" || ds === "in_review") ? "pending" : "declined";
+    const isCard = cat === "card" || !!t.cardId;
+    return {
+      id: t.id, desc: t.merchantData?.description || t.description || "", amt: (t.amountCents || 0) / 100,
+      famt: t.originalCurrency ? Math.abs((t.originalCurrency.amountCents || 0) / 100) : NaN,
+      fcur: (t.originalCurrency?.code || "").toUpperCase(),
+      type: isCard ? (status === "pending" ? "card_authorization" : "card_settlement") : cat === "ach" ? "inbound_ach_transfer" : cat,
+      last4: t.cardId || "",
+      dateLocal: isoToLocalISO(t.date), authLocal: isoToLocalISO(t.authorizedAt),
+      status, decline: t.declineReason || "",
+    };
+  }).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0 && !x.decline && x.status !== "declined");
+}
+
+// Pull new transactions through the relay and apply them quietly.
+let syncing = false;
+async function syncSlash(manual){
+  const c = s.settings.slashSync || {};
+  if (!c.url || !c.token || syncing || !navigator.onLine) return;
+  syncing = true;
+  try {
+    const since = c.lastSyncMs ? c.lastSyncMs - 4 * 86400000 : Date.now() - 45 * 86400000;
+    const r = await fetch(`${c.url.replace(/\/+$/, "")}/transactions?since=${since}`, { headers: { Authorization: `Bearer ${c.token}` } });
+    if (!r.ok) throw new Error("relay " + r.status);
+    const j = await r.json();
+    const plan = planFromRecords(s, recsFromSlashApi(j.items));
+    const n = plan.adds.length + plan.updates.length;
+    if (n) { armUndo(structuredClone(s)); applySlashImport(s, plan); }
+    s.settings.slashSync = { ...c, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} settled` : "nothing new", lastError: "" };
+    save();
+    if (n || manual) render();
+    if (n) toast(`Slash: ${plan.adds.length} new${plan.updates.length ? `, ${plan.updates.length} settled` : ""}`);
+  } catch (e) {
+    s.settings.slashSync = { ...c, lastError: String(e.message || e) };
+    save(); if (manual) render();
+  } finally { syncing = false; }
+}
+
+let toastTimer = null;
+function toast(text){
+  let el = document.getElementById("toast");
+  if (!el) { el = document.createElement("div"); el.id = "toast"; el.className = "toast num"; document.body.appendChild(el); }
+  el.textContent = text; el.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
 }
 
 function applySlashImport(st, plan){
@@ -1174,6 +1239,17 @@ function renderSettings(){
         </div>`:""}
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <div class="lbl" style="font-size:12px;color:var(--muted)">Auto-sync with Slash</div>
+      <div class="sub" style="margin:4px 0 10px">New transactions land here on their own, through your own relay (see relay/README.md). Your Slash API key never touches this app.</div>
+      <div class="addgrid" style="grid-template-columns:1fr 1fr auto;gap:8px">
+        <input id="ssUrl" value="${esc(s.settings.slashSync?.url||"")}" placeholder="https://money-relay.you.workers.dev" aria-label="Relay URL">
+        <input id="ssTok" type="password" value="${esc(s.settings.slashSync?.token||"")}" placeholder="App token" aria-label="Relay app token" autocomplete="off">
+        <button class="btn btn2" id="ssSync">Sync now</button>
+      </div>
+      ${s.settings.slashSync?.lastSyncMs?`<div class="sub" style="margin-top:8px">Last sync ${new Date(s.settings.slashSync.lastSyncMs).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})} · ${esc(s.settings.slashSync.lastResult||"")}</div>`:""}
+      ${s.settings.slashSync?.lastError?`<div class="runway low" style="margin-top:6px">Couldn't sync: ${esc(s.settings.slashSync.lastError)}</div>`:""}
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <label class="sub" style="margin:0" for="wipeMonth">Delete a whole month of entries</label>
         <input type="month" id="wipeMonth" style="width:auto;font-size:12.5px;font-weight:400" aria-label="Month to delete">
@@ -1211,6 +1287,10 @@ function renderSettings(){
     ${undoChipHTML()}`;
   bindUndo();
   document.getElementById("back").onclick = ()=>{ pendingImport=null; pendingCsv=null; csvError=false; wipeMsg=""; view="day"; render(); };
+  const ssSave = ()=>{ s.settings.slashSync = { ...(s.settings.slashSync||{}), url: document.getElementById("ssUrl").value.trim(), token: document.getElementById("ssTok").value.trim() }; save(); };
+  document.getElementById("ssUrl").onchange = ssSave;
+  document.getElementById("ssTok").onchange = ssSave;
+  document.getElementById("ssSync").onclick = ()=>{ ssSave(); syncSlash(true); };
   document.getElementById("wipeBtn").onclick = ()=>{
     const ym = document.getElementById("wipeMonth").value;
     if (!ym) { wipeMsg = "Pick a month first."; render(); return; }
@@ -1885,7 +1965,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO };
 } else {
   s = load();
   date = s.lastDate || todayISO();
@@ -1897,6 +1977,9 @@ if (typeof window === "undefined") {
   }
   refreshRate();
   setInterval(refreshRate, 6 * 60 * 60 * 1000);
+  syncSlash(false);
+  setInterval(() => syncSlash(false), 3 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") syncSlash(false); });
 
   // swipe left/right to move through days (or months on the month tab)
   let sx = 0, sy = 0, st0 = 0;

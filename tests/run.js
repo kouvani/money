@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -482,6 +482,27 @@ const round2 = n => Math.round(n * 100) / 100;
   const text = dayBriefText(sm, '2026-08-31', '2026-09-01');
   assert('brief text names the open item and the net', text.includes('Still open: Chapa - rent') && text.includes('down US$1,545.00'));
   assert('empty days read naturally', dayBriefText(daySummary(st, '2026-09-05'), '2026-09-05', '2026-09-01') === 'Nothing planned yet.');
+}
+
+// 25. Live Slash API items map exactly like CSV rows
+{
+  const items = [
+    { id: "tx_a", date: "2026-09-01T12:00:00.000Z", description: "Incoming ACH credit from EMS", amountCents: 18995, status: "posted", detailedStatus: "settled", category: "ach", achInfo: {} },
+    { id: "tx_b", date: "2026-09-01T12:05:00.000Z", description: "SUSHI SHOP - 2250", merchantData: { description: "SUSHI SHOP - 2250" }, amountCents: -5036, status: "posted", detailedStatus: "settled", category: "card", cardId: "c_1", authorizedAt: "2026-08-31T12:10:00.000Z", originalCurrency: { code: "CAD", amountCents: -6971, conversionRate: 0.72242 } },
+    { id: "tx_c", date: "2026-09-01T12:06:00.000Z", description: "PHARMAPRIX #1810", amountCents: -6063, status: "pending", detailedStatus: "pending", category: "card", cardId: "c_1", originalCurrency: { code: "CAD", amountCents: -8393 } },
+    { id: "tx_d", date: "2026-09-01T12:07:00.000Z", description: "NOPE", amountCents: -100, status: "failed", detailedStatus: "declined", category: "card", cardId: "c_1", declineReason: "insufficient" },
+  ];
+  const recs = recsFromSlashApi(items);
+  assert("declined items are dropped", recs.length === 3);
+  const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true };
+  const plan = planFromRecords(st, recs);
+  const credit = plan.adds.find(a => a.importId === "tx_a"), sushi = plan.adds.find(a => a.importId === "tx_b"), hold = plan.adds.find(a => a.importId === "tx_c");
+  assert("API credit lands settled on its day", !!credit && credit.kind === "in" && credit.usd === 189.95 && credit.checked && credit.settle === "2026-09-01" && credit.name === "EMS");
+  assert("API card purchase sits on its authorization day with CAD locked", !!sushi && sushi.date === "2026-08-31" && sushi.cadFixed === 69.71 && sushi.usd === 50.36 && sushi.name === "SUSHI SHOP");
+  assert("API pending hold is money held, not settled", !!hold && hold.checked === true && hold.settle === "pending");
+  applySlashImport(st, plan);
+  assert("a second sync of the same items adds nothing", planFromRecords(st, recsFromSlashApi(items)).adds.length === 0);
+  assert("ISO timestamps convert to local dates", isoToLocalISO("2026-09-01T12:00:00.000Z") === "2026-09-01" && isoToLocalISO("") === null);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
