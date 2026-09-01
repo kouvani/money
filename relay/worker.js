@@ -24,7 +24,7 @@ export default {
       const q = new URL("https://api.slash.com/transaction");
       if (since) q.searchParams.set("filter:from_date", since);
       if (cursor) q.searchParams.set("cursor", cursor);
-      const r = await fetch(q, { headers: { "X-API-Key": env.SLASH_API_KEY, "Accept": "application/json" } });
+      const r = await fetch(q, { headers: { "X-API-Key": env.SLASH_API_KEY, "Accept": "application/json", "User-Agent": "money-relay/1.0" } });
       if (!r.ok) return new Response(await r.text(), { status: r.status, headers: cors });
       const j = await r.json();
       items.push(...(j.items || []));
