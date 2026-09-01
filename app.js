@@ -51,6 +51,7 @@ function ensure(st){
   st.items = st.items || [];
   st.settings = Object.assign({ theme: "system", currencyDisplay: "both", warnDaysAhead: 3 }, st.settings || {});
   st.adjust = st.adjust || {};
+  st.goals = st.goals || [];
   st.vendors.forEach(v => {
     v.note = v.note ?? ""; v.url = v.url ?? ""; v.cadence = v.cadence ?? null;
     v.dayOfMonth = v.dayOfMonth ?? null; v.defaultAccountId = v.defaultAccountId ?? null;
@@ -284,25 +285,108 @@ function runwayInfo(st, today){
   return { burning: true, days: Math.max(0, Math.floor(cash / perDay)) };
 }
 
-// End-of-day balances for the trailing 30 days, drawn as a quiet line.
-function sparkData(st, today){
-  const pts = [];
-  for (let i = 29; i >= 0; i--) pts.push(calc(st, shift(today, -i)).end);
-  return pts;
+// One pass over every entry: per-date checked and total nets.
+function dailyNets(st){
+  const m = new Map();
+  for (const x of st.items) {
+    const e = m.get(x.date) || { chk: 0, all: 0 };
+    const v = x.kind === "in" ? x.usd : -x.usd;
+    e.all += v; if (x.checked) e.chk += v;
+    m.set(x.date, e);
+  }
+  return m;
 }
 
-function sparkSVG(pts){
-  const w = 150, h = 34, p = 3;
-  const min = Math.min(...pts), max = Math.max(...pts);
+// Trailing 30 days of real balances, plus a 7-day projection from
+// everything scheduled but unchecked (overdue included on day one).
+function sparkData(st, today){
+  const nets = dailyNets(st);
+  const adj = st.adjust || {};
+  const windowStart = shift(today, -29);
+  let run = 0;
+  for (const [d, e] of nets) if (d < windowStart) run += e.chk;
+  for (const d in adj) if (d < windowStart) run += adj[d];
+  const past = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = shift(today, -i);
+    run += (adj[d] || 0) + (nets.get(d)?.chk || 0);
+    past.push((d >= st.startDate ? st.startBudget : 0) + run);
+  }
+  const future = [];
+  let runF = past[29];
+  let overdue = 0;
+  for (const [d, e] of nets) if (d <= today) overdue += e.all - e.chk;
+  for (let i = 1; i <= 7; i++) {
+    const d = shift(today, i);
+    if (i === 1) runF += overdue;
+    const e = nets.get(d);
+    runF += (e ? e.all - e.chk : 0) + (adj[d] || 0);
+    future.push(runF);
+  }
+  return { past, future };
+}
+
+function sparkSVG(sd){
+  const all = [...sd.past, ...sd.future];
+  const w = 170, h = 34, p = 3;
+  const min = Math.min(...all), max = Math.max(...all);
   const span = max - min || 1;
-  const X = i => p + i * (w - 2 * p) / (pts.length - 1);
+  const n = all.length;
+  const X = i => p + i * (w - 2 * p) / (n - 1);
   const Y = v => h - p - (v - min) * (h - 2 * p) / span;
-  const line = pts.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
-  const color = pts[pts.length - 1] >= pts[0] ? "var(--in)" : "var(--out)";
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="none" role="img" aria-label="Balance over the last 30 days">
-    <polyline points="${line}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${X(pts.length-1).toFixed(1)}" cy="${Y(pts[pts.length-1]).toFixed(1)}" r="2.4" fill="${color}"/>
+  const solid = sd.past.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const dashed = [sd.past[sd.past.length - 1], ...sd.future].map((v, i) => `${X(sd.past.length - 1 + i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const color = sd.past[sd.past.length - 1] >= sd.past[0] ? "var(--in)" : "var(--out)";
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="none" role="img" aria-label="Balance over the last 30 days and the week ahead">
+    <polyline points="${solid}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <polyline points="${dashed}" stroke="var(--muted)" stroke-width="1.3" stroke-dasharray="3 3" stroke-linejoin="round" stroke-linecap="round" opacity=".75"/>
+    <circle cx="${X(sd.past.length-1).toFixed(1)}" cy="${Y(sd.past[sd.past.length-1]).toFixed(1)}" r="2.4" fill="${color}"/>
   </svg>`;
+}
+
+// ---- goals ----
+
+function goalInfo(st, g, today){
+  const cash = calc(st, today).allTime;
+  const base = Math.min(g.startUsd, g.targetUsd);
+  const denom = g.targetUsd - base || 1;
+  const pct = Math.max(0, Math.min(1, (cash - base) / denom));
+  const reached = cash >= g.targetUsd;
+  const daysLeft = Math.max(0, dayDiff(today, g.targetDate));
+  const needPerDay = reached || daysLeft === 0 ? 0 : (g.targetUsd - cash) / daysLeft;
+  const from = shift(today, -30);
+  const pace = st.items.filter(x => x.checked && x.date > from && x.date <= today)
+    .reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0) / 30;
+  return { cash, pct, reached, daysLeft, needPerDay, pace, behind: !reached && daysLeft > 0 && needPerDay > Math.max(pace, 0) };
+}
+
+// The one most useful thing the numbers can say right now.
+function insightsFor(st, today){
+  const out = [];
+  const week = st.items.filter(x => !x.checked && x.date > today && x.date <= shift(today, 7));
+  const owed = week.filter(x => x.kind === "out").reduce((t, x) => t + x.usd, 0);
+  const expIn = week.filter(x => x.kind === "in").reduce((t, x) => t + x.usd, 0);
+  if (owed > 0 || expIn > 0) {
+    const proj = calc(st, today).allTime + expIn - owed;
+    out.push({ tone: proj < 0 ? "warn" : "info", text: `Next 7 days: ${fmt(owed)} owed${expIn > 0.004 ? `, ${fmt(expIn)} expected in` : ""} — projected Left ${fmt(proj)}.` });
+  }
+  const ym = today.slice(0, 7), prevYm = addMonths(today, -1).slice(0, 7);
+  const byVendor = new Map();
+  for (const x of st.items) {
+    if (x.kind !== "out" || !x.checked) continue;
+    const k = x.name.trim().toLowerCase();
+    const e = byVendor.get(k) || { name: x.name.trim(), cur: 0, prev: 0 };
+    if (x.date.slice(0, 7) === ym) e.cur += x.usd;
+    if (x.date.slice(0, 7) === prevYm) e.prev += x.usd;
+    byVendor.set(k, e);
+  }
+  const top = [...byVendor.values()].filter(e => e.cur > 0).sort((a, b) => b.cur - a.cur)[0];
+  if (top) out.push({ tone: "info", text: `Biggest cost this month: ${top.name} ${fmt(top.cur)}${top.prev > 0.004 ? ` (last month ${fmt(top.prev)})` : ""}.` });
+  const isProcId = new Set(st.vendors.filter(v => v.isProcessor).map(v => v.id));
+  const pin = st.items.filter(x => x.checked && x.kind === "in" && isProcId.has(x.vendorId) && x.date.slice(0, 7) === ym).reduce((t, x) => t + x.usd, 0);
+  const pout = st.items.filter(x => x.checked && x.kind === "out" && isProcId.has(x.vendorId) && x.date.slice(0, 7) === ym).reduce((t, x) => t + x.usd, 0);
+  if (pin > 0 && pout > 0) out.push({ tone: "info", text: `Processor fees and debits are ${(pout / pin * 100).toFixed(1)}% of payouts this month.` });
+  return out;
 }
 
 // The strip's numbers glide to their new value instead of snapping.
@@ -549,7 +633,55 @@ function render(){
   if (view === "vendors") return renderVendors();
   if (view === "accounts") return renderAccounts();
   if (view === "settings") return renderSettings();
+  if (view === "goals") return renderGoals();
   renderMain();
+}
+
+function renderGoals(){
+  const t = todayISO();
+  document.getElementById("app").innerHTML = `
+    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
+    <div class="lt" style="font-size:20px;margin-bottom:4px">Goals</div>
+    <div class="hint" style="padding-left:0;margin-bottom:14px">A cash figure to reach by a date. Progress follows your real balance.</div>
+    ${s.goals.length?s.goals.map(g=>{
+      const gi = goalInfo(s, g, t);
+      const status = gi.reached ? "reached"
+        : gi.daysLeft === 0 ? "past its date"
+        : `${gi.daysLeft} days left · needs +${fmt(gi.needPerDay,"")}/day · pace ${gi.pace>=0?"+":""}${fmt(gi.pace,"")}/day`;
+      return `<div class="row" style="cursor:default;flex-wrap:wrap">
+        <div class="name">${g.name?esc(g.name):fmt(g.targetUsd)}<span class="tinytag">${prettyShort(g.targetDate)}</span></div>
+        <div class="amt num" style="font-weight:600;color:${gi.reached?"var(--in)":"var(--ink)"}">${fmt(gi.cash)} / ${fmt(g.targetUsd)}</div>
+        <button class="x" data-goal-remove="${g.id}" title="Remove" aria-label="Remove goal">×</button>
+        <div style="flex-basis:100%;display:flex;align-items:center;gap:10px;padding:4px 0 2px 0">
+          <span class="gbar" style="flex:1;max-width:none"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>
+          <span class="sub num" style="margin:0;white-space:nowrap;${gi.behind?"color:var(--out)":""}">${Math.round(gi.pct*100)}% · ${status}</span>
+        </div>
+      </div>`;
+    }).join(""):'<div class="empty">No goals yet. Set one below.</div>'}
+    <div class="addrow" style="margin-top:26px">
+      <div class="addgrid" style="grid-template-columns:1fr 120px 150px auto">
+        <input id="goalName" placeholder="Reserve cushion" aria-label="Goal name (optional)">
+        <input id="goalAmt" type="number" step="0.01" placeholder="20000" style="text-align:right" aria-label="Target amount USD">
+        <input id="goalDate" type="date" style="width:100%;font-weight:400;font-size:14px" aria-label="Target date">
+        <button class="btn" id="goalAdd">Add</button>
+      </div>
+    </div>`;
+  document.getElementById("back").onclick = ()=>{ view="day"; render(); };
+  document.querySelectorAll("[data-goal-remove]").forEach(b=>b.onclick=()=>{
+    armUndo(structuredClone(s));
+    s.goals = s.goals.filter(g=>g.id!==b.dataset.goalRemove);
+    save(); render();
+  });
+  const doAdd = ()=>{
+    const amt = parseFloat(document.getElementById("goalAmt").value);
+    const dt = document.getElementById("goalDate").value;
+    if (!(amt > 0) || !dt) return;
+    s.goals.push({ id: uid("g"), name: document.getElementById("goalName").value.trim(), targetUsd: amt, targetDate: dt,
+                   startUsd: calc(s, t).allTime, createdAt: t });
+    save(); render();
+  };
+  document.getElementById("goalAdd").onclick = doAdd;
+  ["goalName","goalAmt"].forEach(id=>document.getElementById(id).onkeydown = e=>{ if(e.key==="Enter") doAdd(); });
 }
 
 let pendingImport = null;
@@ -804,11 +936,28 @@ function renderMain(){
       <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)" id="numOut">−${fmt(m.outC,"")}</div>${m.outA>m.outC?`<div class="sub">of ${fmt(m.outA,"")} owed</div>`:""}</div></div>
       <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}" id="numLeft">${fmt(m.end)}</div><div class="sub">${fmt(m.end*s.rate,"C$")}</div></div></div>
     </div>
-    ${view==="day"?(()=>{ const r = runwayInfo(s, todayISO());
-      const text = r.burning
+    ${view==="day"?(()=>{ const t = todayISO();
+      const r = runwayInfo(s, t);
+      const rText = r.burning
         ? `Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.`
         : "At this month's pace, cash is growing.";
-      return `<div class="pulse num">${sparkSVG(sparkData(s, todayISO()))}<span class="ptext${r.burning&&r.days<30?" low":""}">${text}</span></div>`; })():""}
+      const g = s.goals.filter(x=>!x.dismissed).sort((a,b)=>a.targetDate.localeCompare(b.targetDate))[0];
+      let goalLine = "";
+      if (g) {
+        const gi = goalInfo(s, g, t);
+        goalLine = gi.reached
+          ? `<span class="ptext">Goal reached: ${fmt(g.targetUsd)}${g.name?` — ${esc(g.name)}`:""}.</span>`
+          : `<span class="ptext${gi.behind?" low":""}">${g.name?esc(g.name)+" — ":""}${fmt(g.targetUsd)} by ${prettyShort(g.targetDate)} · ${Math.round(gi.pct*100)}% there${gi.needPerDay>0?` · needs +${fmt(gi.needPerDay,"")}/day`:""}</span>
+             <span class="gbar" aria-hidden="true"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>`;
+      }
+      const ins = insightsFor(s, t)[0];
+      return `<div class="pulse num">${sparkSVG(sparkData(s, t))}
+        <div class="pstack">
+          <span class="ptext${r.burning&&r.days<30?" low":""}">${rText}</span>
+          ${goalLine}
+          ${ins?`<span class="ptext${ins.tone==="warn"?" low":""}">${ins.text}</span>`:""}
+        </div>
+      </div>`; })():""}
     ${(()=>{ const fl = s.items.filter(x=>!x.checked && x.settle==="pending").reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
       return Math.abs(fl)>0.004 ? `<div class="summary num"><span><b>${fmt(fl)}</b> authorized at the bank, waiting to settle — not counted in Left yet</span></div>` : ""; })()}
     <div class="summary num">
@@ -824,6 +973,7 @@ function renderMain(){
       <span style="margin-left:18px">Started ${pretty(s.startDate)} with ${fmt(s.startBudget)}</span>
       <button class="link" id="accountsLink">accounts</button>
       <button class="link" id="vendorsLink">vendors</button>
+      <button class="link" id="goalsLink">goals</button>
       <button class="link" id="settingsLink">settings</button>
       <button class="link" id="export">export CSV</button>
     </div>
@@ -1113,6 +1263,7 @@ function bindMain(){
   };
   $("accountsLink").onclick = ()=>{ view="accounts"; render(); };
   $("vendorsLink").onclick = ()=>{ view="vendors"; render(); };
+  $("goalsLink").onclick = ()=>{ view="goals"; render(); };
   $("settingsLink").onclick = ()=>{ view="settings"; render(); };
   $("export").onclick = exportCsv;
 }
@@ -1137,7 +1288,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor };
 } else {
   s = load();
   date = s.lastDate || todayISO();

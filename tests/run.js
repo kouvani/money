@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -229,9 +229,17 @@ const round2 = n => Math.round(n * 100) / 100;
 
   const st2 = structuredClone(SEED);
   st2.items.forEach(x=>{ x.checked = true; });
-  const pts = sparkData(st2, "2026-09-01");
+  const sd = sparkData(st2, "2026-09-01");
+  const pts = sd.past;
   assert("sparkline covers 30 days and ends at today's balance", pts.length === 30 && Math.round(pts[29]*100)/100 === 5058.15);
   assert("sparkline is zero before the start, then jumps on Aug 31", Math.round(pts[27]*100)/100 === 0 && Math.round(pts[28]*100)/100 === 5058.15);
+  // projection: an unchecked bill on Sep 3 pulls the dashed line down
+  st2.items.push({ id: "f1", kind: "out", date: "2026-09-03", name: "Meta ads", usd: 1000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const sd2 = sparkData(st2, "2026-09-01");
+  assert("future tail projects scheduled unchecked entries", sd2.future.length === 7
+    && Math.round(sd2.future[0]*100)/100 === 5058.15
+    && Math.round(sd2.future[1]*100)/100 === 4058.15
+    && Math.round(sd2.future[6]*100)/100 === 4058.15);
 }
 
 // 14. Authorized vs settled: an ACH line that appeared at the bank doesn't count until it settles
@@ -266,6 +274,33 @@ const round2 = n => Math.round(n * 100) / 100;
   st.vendors.find(v=>v.name==="ems").isProcessor = false;
   const again = ensure(structuredClone(st));
   assert("turning a processor off sticks across loads", again.vendors.find(v=>v.name==="ems").isProcessor === false);
+}
+
+// 16. Goals: progress from the real balance, pace math, reached state
+{
+  const st = structuredClone(SEED);
+  st.items.forEach(x=>{ x.checked = true; }); // cash ~= 5058.15
+  const g = { id: "g1", name: "Cushion", targetUsd: 10000, targetDate: "2026-10-01", startUsd: 0, createdAt: "2026-09-01" };
+  st.goals = [g];
+  const gi = goalInfo(st, g, "2026-09-01");
+  const cash = calc(st, "2026-09-01").allTime;
+  assert("goal progress tracks the real balance", Math.abs(gi.pct - cash/10000) < 1e-9 && gi.reached === false);
+  assert("needs-per-day covers the gap by the date", gi.daysLeft === 30 && Math.abs(gi.needPerDay - (10000 - cash)/30) < 1e-9);
+  assert("burning pace means behind", gi.pace < 0 && gi.behind === true);
+  const done = goalInfo(st, { ...g, targetUsd: 5000 }, "2026-09-01");
+  assert("a passed target reads as reached", done.reached === true && done.pct === 1 && done.needPerDay === 0);
+}
+
+// 17. Insights: the week ahead is summarized with a projection
+{
+  const st = structuredClone(SEED);
+  st.items[1].checked = true; // cash = 6858.01
+  st.items.push({ id: "n1", kind: "out", date: "2026-09-04", name: "Meta ads", usd: 500, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push({ id: "n2", kind: "in", date: "2026-09-05", name: "Kurv payout", usd: 2000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const ins = insightsFor(st, "2026-09-01");
+  assert("week-ahead insight exists with owed, expected, projection",
+    ins[0].text.includes("US$500.00 owed") && ins[0].text.includes("US$2,000.00 expected") && ins[0].text.includes("US$8,358.01"));
+  assert("biggest-cost insight names the vendor", ins.some(i => i.text.includes("Biggest cost this month")) === false); // Chargeblast was paid in August, not this month
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
