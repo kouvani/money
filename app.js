@@ -178,16 +178,18 @@ function calc(st, day){
   // a start-of-day correction on day D counts from D onward, without being money in or out
   const adjUpTo = Object.keys(adj).filter(d => d <= day).reduce((t, d) => t + adj[d], 0);
   const adjAll = Object.values(adj).reduce((t, v) => t + v, 0);
-  // money starts existing on the start date; every day before it is zero
-  const carry = (day >= st.startDate ? st.startBudget : 0) + adjUpTo + st.items.filter(x=>x.checked && x.date<day).reduce((t,x)=>t+sgn(x),0);
+  // the starting balance is a snapshot: entries dated before the start date are
+  // history (visible, searchable, in vendor totals) but never move balances
+  const started = x => x.date >= st.startDate;
+  const carry = (day >= st.startDate ? st.startBudget : 0) + adjUpTo + st.items.filter(x=>x.checked && started(x) && x.date<day).reduce((t,x)=>t+sgn(x),0);
   const today = st.items.filter(x=>x.date===day);
   const inT = today.filter(x=>x.kind==="in"), outT = today.filter(x=>x.kind==="out");
   const sum = (a,only) => a.filter(x=>!only||x.checked).reduce((t,x)=>t+x.usd,0);
   const inC=sum(inT,true), inA=sum(inT), outC=sum(outT,true), outA=sum(outT);
   const end = carry + inC - outC;
-  const allTime = st.startBudget + adjAll + st.items.filter(x=>x.checked).reduce((t,x)=>t+sgn(x),0);
-  const ifAll = st.startBudget + adjAll + st.items.reduce((t,x)=>t+sgn(x),0);
-  const pendingEarlier = st.items.filter(x=>!x.checked && x.date<day).length;
+  const allTime = st.startBudget + adjAll + st.items.filter(x=>x.checked && started(x)).reduce((t,x)=>t+sgn(x),0);
+  const ifAll = st.startBudget + adjAll + st.items.filter(started).reduce((t,x)=>t+sgn(x),0);
+  const pendingEarlier = st.items.filter(x=>!x.checked && started(x) && x.date<day).length;
   const dates = [...new Set(st.items.map(x=>x.date))].sort().reverse();
   return { carry,inT,outT,inC,inA,outC,outA,end,allTime,ifAll,pendingEarlier,dates };
 }
@@ -321,10 +323,10 @@ const dayDiff = (a, b) => Math.round((new Date(b + "T00:00") - new Date(a + "T00
 // Trailing 30-day net of checked entries; days of cash left at that pace.
 function runwayInfo(st, today){
   const from = shift(today, -30);
-  const win = st.items.filter(x => x.checked && x.date > from && x.date <= today);
+  const win = st.items.filter(x => x.checked && x.date >= st.startDate && x.date > from && x.date <= today);
   const net = win.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
   const cash = st.startBudget + Object.values(st.adjust || {}).reduce((t, v) => t + v, 0)
-    + st.items.filter(x => x.checked).reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+    + st.items.filter(x => x.checked && x.date >= st.startDate).reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
   if (net >= 0) return { burning: false, days: null };
   const perDay = -net / 30;
   return { burning: true, days: Math.max(0, Math.floor(cash / perDay)) };
@@ -348,19 +350,21 @@ function sparkData(st, today){
   const nets = dailyNets(st);
   const adj = st.adjust || {};
   const windowStart = shift(today, -29);
-  let run = 0;
-  for (const [d, e] of nets) if (d < windowStart) run += e.chk;
-  for (const d in adj) if (d < windowStart) run += adj[d];
+  let chkRun = 0, adjRun = 0;
+  for (const [d, e] of nets) if (d >= st.startDate && d < windowStart) chkRun += e.chk;
+  for (const d in adj) if (d < windowStart) adjRun += adj[d];
   const past = [];
   for (let i = 29; i >= 0; i--) {
     const d = shift(today, -i);
-    run += (adj[d] || 0) + (nets.get(d)?.chk || 0);
-    past.push((d >= st.startDate ? st.startBudget : 0) + run);
+    adjRun += adj[d] || 0;
+    if (d >= st.startDate) chkRun += nets.get(d)?.chk || 0;
+    // before the start, a day just shows its own movement; from the start on, the chain
+    past.push(d >= st.startDate ? st.startBudget + adjRun + chkRun : (nets.get(d)?.chk || 0) + adjRun);
   }
   const future = [];
   let runF = past[29];
   let overdue = 0;
-  for (const [d, e] of nets) if (d <= today) overdue += e.all - e.chk;
+  for (const [d, e] of nets) if (d >= st.startDate && d <= today) overdue += e.all - e.chk;
   for (let i = 1; i <= 7; i++) {
     const d = shift(today, i);
     if (i === 1) runF += overdue;

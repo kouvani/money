@@ -142,7 +142,8 @@ const round2 = n => Math.round(n * 100) / 100;
   const d15 = md.days.find(d => d.date === "2026-08-15");
   const d31 = md.days.find(d => d.date === "2026-08-31");
   assert("dots reflect in/out entries", d15.hasIn && !d15.hasOut && d31.hasOut);
-  assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 2000 && Math.round(d31.end*100)/100 === 8858.01);
+  assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 2000 && Math.round(d31.end*100)/100 === 6858.01);
+  assert("pre-start history never moves the balance", Math.round(calc(st, "2026-09-01").allTime*100)/100 === 6858.01);
   assert("days before the start date hold no starting money", Math.round(md.days.find(d=>d.date==="2026-08-01").end*100)/100 === 0);
   assert("past days with unchecked entries are marked", d31.warn === true && d15.warn === false);
   assert("august 2026 starts on a saturday", md.offset === 6 && md.days.length === 31);
@@ -151,7 +152,7 @@ const round2 = n => Math.round(n * 100) / 100;
 // 9. Runway: trailing 30-day net of checked entries, days of cash at that pace
 {
   const st = structuredClone(SEED);
-  st.startBudget = 9000; st.items = [];
+  st.startBudget = 9000; st.startDate = "2026-07-01"; st.items = [];
   const mk = (id, kind, dt, usd, checked) => ({ id, kind, date: dt, name: id, usd, cadFixed: null, checked, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
   st.items.push(mk("w1", "out", "2026-08-20", 2000, true));   // in window
   st.items.push(mk("w2", "in",  "2026-08-25", 500,  true));   // in window
