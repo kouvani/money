@@ -305,8 +305,17 @@ function paintNum(id, val, fmtFn){
   requestAnimationFrame(tick);
 }
 
+// Checking an entry that was authorized-but-unsettled stamps the settled date.
+function toggleItem(st, id, today){
+  const x = st.items.find(i => i.id === id);
+  if (!x) return null;
+  x.checked = !x.checked;
+  if (x.checked && x.settle === "pending") x.settle = today;
+  return x;
+}
+
 function dueMark(x, today){
-  if (x.checked) return "";
+  if (x.checked || x.settle === "pending") return "";
   if (x.date < today) return '<span class="mark">overdue</span>';
   const d = dayDiff(today, x.date);
   if (d > (s?.settings?.warnDaysAhead ?? 3)) return "";
@@ -445,18 +454,19 @@ function rowHTML(x){
     </label>`:""}
     <input data-note="${x.id}" value="${esc(x.note)}" placeholder="Note" aria-label="Note for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
     <input data-receipt="${x.id}" value="${esc(x.receiptUrl)}" placeholder="Receipt link" aria-label="Receipt link for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
-    ${x.checked?`<label class="sub" style="margin:0">Settlement
+    <label class="sub" style="margin:0">Settlement
       <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
         <option value="" ${!x.settle?"selected":""}>—</option>
         <option value="pending" ${x.settle==="pending"?"selected":""}>authorized, not settled</option>
         <option value="settled" ${x.settle&&x.settle!=="pending"?"selected":""}>settled${x.settle&&x.settle!=="pending"?" "+prettyShort(x.settle):""}</option>
       </select>
-    </label>`:""}
+    </label>
   </div>` : "";
+  const authorized = !x.checked && x.settle === "pending";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <span class="drag" draggable="true" data-drag="${x.id}" title="Drag to reorder"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg></span>
-    <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.checked&&x.settle==="pending"?'<span class="mark" style="color:var(--muted)">not settled</span>':""}${dueMark(x, todayISO())}</div>
+    <input type="checkbox" ${x.checked?"checked":""} ${authorized?'data-ind="1"':""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":authorized?"authorized, waiting to settle — check when it settles":"expected"}">
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${dueMark(x, todayISO())}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
@@ -778,6 +788,8 @@ function renderMain(){
         ? `Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.`
         : "At this month's pace, cash is growing.";
       return `<div class="pulse num">${sparkSVG(sparkData(s, todayISO()))}<span class="ptext${r.burning&&r.days<30?" low":""}">${text}</span></div>`; })():""}
+    ${(()=>{ const fl = s.items.filter(x=>!x.checked && x.settle==="pending").reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
+      return Math.abs(fl)>0.004 ? `<div class="summary num"><span><b>${fmt(fl)}</b> authorized at the bank, waiting to settle — not counted in Left yet</span></div>` : ""; })()}
     <div class="summary num">
       <span>All days so far: <b>${fmt(m.allTime)}</b></span>
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmt(m.ifAll)}</b></span>
@@ -915,7 +927,10 @@ function bindShared(){
   const app = document.getElementById("app");
   bindUndo();
   app.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
-  app.querySelectorAll("[data-toggle]").forEach(c=>c.onchange=()=>{ const x=s.items.find(i=>i.id===c.dataset.toggle); x.checked=!x.checked; save(); render(); });
+  app.querySelectorAll("[data-toggle]").forEach(c=>{
+    c.indeterminate = c.hasAttribute("data-ind");
+    c.onchange=()=>{ toggleItem(s, c.dataset.toggle, todayISO()); save(); render(); };
+  });
   app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
     const x = s.items.find(i=>i.id===b.dataset.remove);
@@ -957,6 +972,8 @@ function bindShared(){
     sel.onchange = ()=>{
       const x = s.items.find(i=>i.id===sel.dataset.settle);
       x.settle = sel.value === "settled" ? todayISO() : (sel.value || null);
+      if (sel.value === "settled" && !x.checked) x.checked = true; // settled money is real money
+      if (sel.value === "pending") x.checked = false;              // authorized money isn't usable yet
       save(); render();
     };
   });
@@ -1099,7 +1116,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem };
 } else {
   s = load();
   date = s.lastDate || todayISO();

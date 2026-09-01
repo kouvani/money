@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -232,6 +232,23 @@ const round2 = n => Math.round(n * 100) / 100;
   const pts = sparkData(st2, "2026-09-01");
   assert("sparkline covers 30 days and ends at today's balance", pts.length === 30 && Math.round(pts[29]*100)/100 === 5058.15);
   assert("sparkline is zero before the start, then jumps on Aug 31", Math.round(pts[27]*100)/100 === 0 && Math.round(pts[28]*100)/100 === 5058.15);
+}
+
+// 14. Authorized vs settled: an ACH line that appeared at the bank doesn't count until it settles
+{
+  const st = structuredClone(SEED);
+  st.items = [];
+  // Kurv payout from Thursday's orders appears Friday night, settles Monday morning
+  st.items.push({ id: "k1", kind: "in", date: "2026-09-04", name: "Kurv payout", usd: 2000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, settle: "pending" });
+  const friday = calc(st, "2026-09-04");
+  assert("authorized money is visible but not in Left", Math.round(friday.end*100)/100 === 8403.01 && friday.inA === 2000 && friday.inC === 0);
+  // Monday morning: it settles — one tap checks it and stamps the settled date
+  const x = toggleItem(st, "k1", "2026-09-07");
+  assert("checking a pending entry counts it and stamps settled-at", x.checked === true && x.settle === "2026-09-07");
+  assert("after settlement the money is in Left", Math.round(calc(st, "2026-09-07").end*100)/100 === 10403.01);
+  // unchecking later keeps the settle stamp for the record
+  toggleItem(st, "k1", "2026-09-08");
+  assert("unchecking keeps the settled-at record", x.checked === false && x.settle === "2026-09-07");
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
