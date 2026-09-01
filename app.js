@@ -855,7 +855,7 @@ function listHTML(kind, items){
     ${items.length?`<div data-rows="${kind}">${stackedRows(items, kind, kind==="out")}</div>`:'<div class="empty">Nothing on this day.</div>'}
     <div class="addrow">
       <div class="addgrid">
-        <input data-f="name" data-k="${kind}" list="vendorNames" value="${esc(d.name)}" placeholder="${isIn?"Shopify payout":"Meta ads"}" aria-label="Name" autocomplete="off">
+        <input data-f="name" data-k="${kind}" value="${esc(d.name)}" placeholder="${isIn?"Shopify payout":"Meta ads"}" aria-label="Name" autocomplete="off">
         <input data-f="amount" data-k="${kind}" type="number" step="0.01" value="${esc(d.amount)}" placeholder="0.00" style="text-align:right" aria-label="Amount">
         <select data-f="cur" data-k="${kind}" aria-label="Currency" style="padding:9px 6px"><option ${d.cur==="USD"?"selected":""}>USD</option><option ${d.cur==="CAD"?"selected":""}>CAD</option></select>
         <button class="btn" data-add="${kind}">Add</button>
@@ -1226,8 +1226,9 @@ function renderAccounts(){
   document.getElementById("accName").onkeydown = e=>{ if(e.key==="Enter") doAdd(); };
 }
 
+// The datalist starts empty: no dropdown on click, suggestions only once you type.
 function datalistHTML(){
-  return `<datalist id="vendorNames">${s.vendors.map(v=>`<option value="${esc(v.name)}">`).join("")}</datalist>`;
+  return `<datalist id="vendorNames"></datalist>`;
 }
 
 const CHEV = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.8 3.5L5.3 8l4.5 4.5"/></svg>';
@@ -1638,6 +1639,16 @@ function bindMain(){
       drafts[k][f]=el.value;
       if(f==="cur"||f==="amount") cadNote(k);
       if(f==="name"){
+        // suggest only after typing, and only what matches
+        const q = el.value.trim().toLowerCase();
+        const dl = document.getElementById("vendorNames");
+        if (q.length >= 1) {
+          if (dl) dl.innerHTML = s.vendors.filter(z=>z.name.toLowerCase().includes(q)).slice(0,8).map(z=>`<option value="${esc(z.name)}">`).join("");
+          el.setAttribute("list", "vendorNames");
+        } else {
+          el.removeAttribute("list");
+          if (dl) dl.innerHTML = "";
+        }
         const v = findVendorByName(s, el.value);
         if (v && !(parseFloat(drafts[k].amount)>0)) {
           const d0 = vendorDefaults(v);
