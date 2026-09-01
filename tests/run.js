@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -174,6 +174,30 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("search by amount", matchesSearch(st, x, "1545"));
   assert("search misses cleanly", !matchesSearch(st, x, "regus"));
   assert("empty query matches all", matchesSearch(st, x, "  "));
+}
+
+// 11. Import diff preview and backup reminder
+{
+  const cur = structuredClone(SEED);
+  const inc = structuredClone(SEED);
+  inc.items[0].checked = true;                          // change o1
+  inc.items = inc.items.filter(x => x.id !== "o2");     // remove o2
+  inc.items.push({ id: "n1", kind: "in", date: "2026-09-02", name: "Payout", usd: 100, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  inc.rate = 1.40;
+  const d = diffStates(cur, inc);
+  assert("diff counts adds, changes, removes", d.items.add === 1 && d.items.change === 1 && d.items.remove === 1);
+  assert("diff flags a rate change, not a start change", d.rateChanged && !d.startChanged);
+  const same = diffStates(cur, structuredClone(SEED));
+  assert("identical states diff to zero", same.items.add === 0 && same.items.change === 0 && same.items.remove === 0);
+
+  const st = structuredClone(SEED);
+  assert("no backup ever -> reminder due", backupDue(st, "2026-09-01") === true);
+  st.settings.lastBackupAt = "2026-08-20";
+  assert("recent backup -> no reminder", backupDue(st, "2026-09-01") === false);
+  st.settings.lastBackupAt = "2026-07-01";
+  assert("stale backup -> reminder", backupDue(st, "2026-09-01") === true);
+  st.settings.backupDismissedAt = "2026-08-25";
+  assert("dismissed -> quiet for 30 days", backupDue(st, "2026-09-01") === false);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

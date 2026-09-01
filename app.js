@@ -297,6 +297,48 @@ function monthHTML(){
   </div>`;
 }
 
+// ---- backup ----
+
+function diffStates(cur, inc){
+  const one = (a, b) => {
+    const am = new Map(a.map(x => [x.id, x])), bm = new Map(b.map(x => [x.id, x]));
+    let add = 0, change = 0, remove = 0;
+    for (const [id, x] of bm) { if (!am.has(id)) add++; else if (JSON.stringify(am.get(id)) !== JSON.stringify(x)) change++; }
+    for (const id of am.keys()) if (!bm.has(id)) remove++;
+    return { add, change, remove };
+  };
+  return {
+    items: one(cur.items, inc.items),
+    vendors: one(cur.vendors, inc.vendors),
+    accounts: one(cur.accounts, inc.accounts),
+    startChanged: cur.startBudget !== inc.startBudget || cur.startDate !== inc.startDate,
+    rateChanged: cur.rate !== inc.rate,
+  };
+}
+
+function backupDue(st, today){
+  if (!st.items.length) return false;
+  const last = st.settings.lastBackupAt;
+  const dismissed = st.settings.backupDismissedAt;
+  const stale = !last || dayDiff(last, today) > 30;
+  const snoozed = dismissed && dayDiff(dismissed, today) <= 30;
+  return stale && !snoozed;
+}
+
+function downloadText(filename, mime, text){
+  const a = document.createElement("a");
+  a.href = `data:${mime};charset=utf-8,` + encodeURIComponent(text);
+  a.download = filename;
+  a.click();
+}
+
+function exportJson(){
+  s.settings.lastBackupAt = todayISO();
+  save();
+  downloadText(`money-backup-${todayISO()}.json`, "application/json", JSON.stringify(s, null, 2));
+  render();
+}
+
 // ---- search ----
 
 function matchesSearch(st, x, q){
@@ -386,7 +428,75 @@ function render(){
   if (view === "vendor") return renderVendor();
   if (view === "vendors") return renderVendors();
   if (view === "accounts") return renderAccounts();
+  if (view === "settings") return renderSettings();
   renderMain();
+}
+
+let pendingImport = null;
+let importError = false;
+
+function renderSettings(){
+  const t = todayISO();
+  const last = s.settings.lastBackupAt;
+  const diff = pendingImport ? diffStates(s, pendingImport) : null;
+  document.getElementById("app").innerHTML = `
+    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
+    <div class="lt" style="font-size:20px;margin-bottom:14px">Settings</div>
+    ${backupDue(s, t)?`<div class="runway low" style="margin:0 0 14px">It's been over 30 days since the last backup.<button class="link" id="dismissBackup">dismiss</button></div>`:""}
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        <button class="btn" id="exportJson">Download backup</button>
+        <span class="sub" style="margin:0">Last backup: ${last?prettyShort(last):"never"}</span>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="sub" style="margin:0" for="importFile">Restore from a backup file</label>
+        <input type="file" id="importFile" accept=".json,application/json" aria-label="Backup file" style="width:auto;font-size:12.5px">
+      </div>
+      ${importError?`<div class="runway low" style="margin-top:10px">That file isn't a Money backup.</div>`:""}
+      ${diff?`<div class="summary num" style="margin-top:14px">
+          <span>This will add <b>${diff.items.add}</b>, change <b>${diff.items.change}</b>, remove <b>${diff.items.remove}</b> ${diff.items.remove===1?"entry":"entries"}</span>
+          <span>Vendors: +${diff.vendors.add} ~${diff.vendors.change} −${diff.vendors.remove}</span>
+          <span>Accounts: +${diff.accounts.add} ~${diff.accounts.change} −${diff.accounts.remove}</span>
+          ${diff.startChanged?"<span>The starting balance changes</span>":""}
+          ${diff.rateChanged?"<span>The rate changes</span>":""}
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn" id="applyImport">Apply</button>
+          <button class="link" id="cancelImport" style="margin-left:0">cancel</button>
+        </div>`:""}
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <label class="sub" style="margin:0">Due-soon marks show
+        <input id="warnDays" type="number" min="0" max="30" value="${s.settings.warnDaysAhead}" style="width:60px;margin:0 6px;padding:5px 8px;font-size:12.5px" aria-label="Days ahead for due marks">
+      days ahead</label>
+    </div>`;
+  document.getElementById("back").onclick = ()=>{ pendingImport=null; view="day"; render(); };
+  document.getElementById("exportJson").onclick = exportJson;
+  const dis = document.getElementById("dismissBackup");
+  if (dis) dis.onclick = ()=>{ s.settings.backupDismissedAt = t; save(); render(); };
+  document.getElementById("importFile").onchange = e=>{
+    const f = e.target.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = ()=>{
+      try {
+        const inc = JSON.parse(rd.result);
+        if (!inc || typeof inc !== "object" || !Array.isArray(inc.items)) throw new Error("bad shape");
+        pendingImport = migrate(inc); importError = false;
+      }
+      catch { pendingImport = null; importError = true; }
+      render();
+    };
+    rd.readAsText(f);
+  };
+  const ap = document.getElementById("applyImport");
+  if (ap) ap.onclick = ()=>{ s = pendingImport; pendingImport = null; date = s.lastDate || todayISO(); save(); render(); };
+  const ci = document.getElementById("cancelImport");
+  if (ci) ci.onclick = ()=>{ pendingImport = null; render(); };
+  document.getElementById("warnDays").onchange = e=>{
+    s.settings.warnDaysAhead = Math.min(30, Math.max(0, parseInt(e.target.value, 10) || 0));
+    save(); render();
+  };
 }
 
 function renderAccounts(){
@@ -515,6 +625,7 @@ function renderMain(){
       <span style="margin-left:18px">Started ${pretty(s.startDate)} with ${fmt(s.startBudget)}</span>
       <button class="link" id="accountsLink">accounts</button>
       <button class="link" id="vendorsLink">vendors</button>
+      <button class="link" id="settingsLink">settings</button>
       <button class="link" id="export">export CSV</button>
     </div>`;
   bindMain();
@@ -725,6 +836,7 @@ function bindMain(){
   };
   $("accountsLink").onclick = ()=>{ view="accounts"; render(); };
   $("vendorsLink").onclick = ()=>{ view="vendors"; render(); };
+  $("settingsLink").onclick = ()=>{ view="settings"; render(); };
   $("export").onclick = exportCsv;
 }
 
@@ -744,11 +856,11 @@ function exportCsv(){
   const rows=[["Date","Type","Name","Amount USD","Amount CAD","CAD locked","Done"],
     ...[...s.items].sort((a,b)=>a.date.localeCompare(b.date)).map(x=>[x.date, x.kind==="in"?"Money in":"Money out", x.name, x.usd.toFixed(6), (x.cadFixed!=null?x.cadFixed:x.usd*s.rate).toFixed(2), x.cadFixed!=null?"yes":"no", x.checked?"yes":"no"])];
   const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
-  const a=document.createElement("a"); a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv); a.download=`money-${todayISO()}.csv`; a.click();
+  downloadText(`money-${todayISO()}.csv`, "text/csv", csv);
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue };
 } else {
   s = load();
   date = s.lastDate || todayISO();
