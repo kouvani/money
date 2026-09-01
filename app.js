@@ -410,6 +410,19 @@ function paintNum(id, val, fmtFn){
   requestAnimationFrame(tick);
 }
 
+// Move an entry to the day the money actually moved (e.g. a card purchase
+// back to its authorization day). A moved generated bill doesn't come back.
+function redateItem(st, id, newDate){
+  const x = st.items.find(i => i.id === id);
+  if (!x || !newDate) return null;
+  if (x.recurringSourceId) {
+    const v = st.vendors.find(z => z.id === x.recurringSourceId);
+    if (v && !(v.skipDates || []).includes(x.date)) (v.skipDates = v.skipDates || []).push(x.date);
+  }
+  x.date = newDate;
+  return x;
+}
+
 // Checking an entry that was authorized-but-unsettled stamps the settled date.
 function toggleItem(st, id, today){
   const x = st.items.find(i => i.id === id);
@@ -559,12 +572,16 @@ function rowHTML(x){
     </label>`:""}
     <input data-note="${x.id}" value="${esc(x.note)}" placeholder="Note" aria-label="Note for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
     <input data-receipt="${x.id}" value="${esc(x.receiptUrl)}" placeholder="Receipt link" aria-label="Receipt link for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
+    <label class="sub" style="margin:0">Day
+      <input type="date" data-redate="${x.id}" value="${x.date}" aria-label="Day for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px;font-weight:400">
+    </label>
     <label class="sub" style="margin:0">Settlement
       <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
         <option value="" ${!x.settle?"selected":""}>—</option>
         <option value="pending" ${x.settle==="pending"?"selected":""}>authorized, not settled</option>
-        <option value="settled" ${x.settle&&x.settle!=="pending"?"selected":""}>settled${x.settle&&x.settle!=="pending"?" "+prettyShort(x.settle):""}</option>
+        <option value="settled" ${x.settle&&x.settle!=="pending"?"selected":""}>settled</option>
       </select>
+      ${x.settle&&x.settle!=="pending"?`<input type="date" data-setdate="${x.id}" value="${x.settle}" aria-label="Settled on" style="width:auto;margin-left:6px;padding:5px 8px;font-size:12.5px;font-weight:400">`:""}
     </label>
   </div>` : "";
   const authorized = !x.checked && x.settle === "pending";
@@ -1139,6 +1156,19 @@ function bindShared(){
       save(); render();
     };
   });
+  app.querySelectorAll("[data-redate]").forEach(el=>{
+    el.onchange = ()=>{
+      if (!el.value) return;
+      redateItem(s, el.dataset.redate, el.value);
+      expandedId = null; save(); render();
+    };
+  });
+  app.querySelectorAll("[data-setdate]").forEach(el=>{
+    el.onchange = ()=>{
+      const x = s.items.find(i=>i.id===el.dataset.setdate);
+      if (el.value) { x.settle = el.value; save(); render(); }
+    };
+  });
   app.querySelectorAll("[data-settle]").forEach(sel=>{
     sel.onchange = ()=>{
       const x = s.items.find(i=>i.id===sel.dataset.settle);
@@ -1288,7 +1318,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem };
 } else {
   s = load();
   date = s.lastDate || todayISO();

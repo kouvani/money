@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -301,6 +301,25 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("week-ahead insight exists with owed, expected, projection",
     ins[0].text.includes("US$500.00 owed") && ins[0].text.includes("US$2,000.00 expected") && ins[0].text.includes("US$8,358.01"));
   assert("biggest-cost insight names the vendor", ins.some(i => i.text.includes("Biggest cost this month")) === false); // Chargeblast was paid in August, not this month
+}
+
+// 18. Moving an entry to the day the money actually moved
+{
+  const st = structuredClone(SEED);
+  // an Uber charge logged on the settled day moves back to its authorization day
+  st.items.push({ id: "u1", kind: "out", date: "2026-08-31", name: "Uber Eats", usd: 52.49, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, settle: "2026-08-31" });
+  redateItem(st, "u1", "2026-08-29");
+  const u = st.items.find(x=>x.id==="u1");
+  assert("entry moves to the authorization day, settled stamp stays", u.date === "2026-08-29" && u.settle === "2026-08-31");
+  assert("the hit lands on the moved-to day", Math.round(calc(st, "2026-08-29").end*100)/100 === -52.49);
+  // a moved generated bill never regenerates on the vacated day
+  const v = upsertVendorFromEntry(st, { id: "r0", kind: "out", date: "2026-09-27", name: "Regus", usd: 850, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  v.cadence = "monthly"; v.dayOfMonth = 27;
+  st.items.push({ id: "r1", kind: "out", date: "2026-09-27", name: "Regus", usd: 850, cadFixed: null, checked: false, accountId: null, vendorId: v.id, note: "", receiptUrl: "", recurringSourceId: v.id });
+  redateItem(st, "r1", "2026-09-29");
+  assert("vacated day is skipped for regeneration", v.skipDates.includes("2026-09-27"));
+  generateRecurring(st, "2026-09-01", null);
+  assert("moved bill doesn't duplicate back", st.items.filter(x=>x.vendorId===v.id && x.date==="2026-09-27").length === 0);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
