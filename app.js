@@ -523,6 +523,74 @@ function dueMark(x, today){
   return `<span class="mark">${d === 0 ? "due today" : d === 1 ? "due tomorrow" : `due in ${d} days`}</span>`;
 }
 
+// ---- day in brief ----
+
+// The day's numbers plus what a typical day looks like (trailing 30 days from the start date).
+function daySummary(st, day){
+  const items = st.items.filter(x => x.date === day);
+  const chk = items.filter(x => x.checked);
+  const sum = (a, k) => a.filter(x => x.kind === k).reduce((t, x) => t + x.usd, 0);
+  const inC = sum(chk, "in"), outC = sum(chk, "out");
+  const pend = items.filter(x => !x.checked);
+  const pendNet = pend.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+  const biggest = [...items].sort((a, b) => b.usd - a.usd)[0] || null;
+  const from = shift(day, -30);
+  const lo = from > st.startDate ? from : st.startDate;
+  const windowDays = Math.max(1, Math.min(30, dayDiff(lo, day)));
+  let n = 0, tin = 0, tout = 0;
+  for (const x of st.items) {
+    if (x.date >= lo && x.date < day) { n++; if (x.checked) { if (x.kind === "in") tin += x.usd; else tout += x.usd; } }
+  }
+  const nets = dailyNets(st);
+  const bars = [];
+  for (let i = 6; i >= 0; i--) { const d = shift(day, -i); bars.push({ date: d, net: d >= st.startDate ? (nets.get(d)?.chk || 0) : 0 }); }
+  return { count: items.length, inC, outC, net: inC - outC, pending: pend, pendNet, biggest,
+           typicalCount: n / windowDays, typicalIn: tin / windowDays, typicalOut: tout / windowDays, windowDays, bars };
+}
+
+function dayBriefText(sm, day, today){
+  const names = a => a.slice(0, 2).map(x => x.name).join(", ") + (a.length > 2 ? ` and ${a.length - 2} more` : "");
+  if (!sm.count) return day > today ? "Nothing planned yet." : day === today ? "Nothing logged yet today." : "Nothing moved that day.";
+  const parts = [];
+  const tc = sm.typicalCount;
+  const tone = tc >= 1 && sm.count >= tc * 1.6 && sm.count >= 4 ? "Busier than usual"
+             : tc >= 1 && sm.count <= tc * 0.5 ? "Quieter than usual"
+             : tc < 1 ? "Early days" : "A normal day";
+  parts.push(`${tone} — ${sm.count} ${sm.count === 1 ? "entry" : "entries"}${tc >= 1 ? ` against a typical ${Math.round(tc)}` : ""}.`);
+  const chkCount = sm.count - sm.pending.length;
+  if (chkCount) {
+    const vs = sm.typicalOut > 0 && sm.outC > 0 ? (sm.outC > sm.typicalOut * 1.5 ? ", well above your usual" : sm.outC < sm.typicalOut * 0.5 ? ", well under your usual" : ", about your usual") : "";
+    parts.push(`In ${fmtP(sm.inC)}, out ${fmtP(sm.outC)}${vs} — ${sm.net >= 0 ? "ahead" : "down"} ${fmtP(Math.abs(sm.net))} so far.`);
+  }
+  if (sm.biggest) parts.push(`Biggest: ${sm.biggest.name} ${sm.biggest.kind === "in" ? "+" : "−"}${fmtPbare(sm.biggest.usd)}.`);
+  if (sm.pending.length) parts.push(`Still open: ${names(sm.pending)} (${fmtP(sm.pendNet)}).`);
+  return parts.join(" ");
+}
+
+function dayBriefHTML(){
+  const t = todayISO();
+  const sm = daySummary(s, date);
+  const w = 168, h = 46, pad = 2, gap = 6, bw = (w - gap * 6) / 7, mid = 30;
+  const maxAbs = Math.max(1, ...sm.bars.map(b => Math.abs(b.net)));
+  const bars = sm.bars.map((b, i) => {
+    const x = i * (bw + gap), hh = Math.max(1.5, Math.abs(b.net) / maxAbs * (mid - pad - 2));
+    const y = b.net >= 0 ? mid - hh : mid;
+    const col = b.net >= 0 ? "var(--in)" : "var(--out)";
+    const wd = new Date(b.date + "T00:00").toLocaleDateString("en-US", { weekday: "narrow" });
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${col}" opacity="${b.date === date ? 1 : .45}"><title>${prettyShort(b.date)} · ${fmtP(b.net)}</title></rect>
+      <text x="${(x + bw / 2).toFixed(1)}" y="${h - 2}" text-anchor="middle" font-size="9" fill="var(--muted)">${wd}</text>`;
+  }).join("");
+  return `<div class="brief">
+    <div class="brief-l">
+      <div class="lbl">Day in brief</div>
+      <p class="brief-text">${esc(dayBriefText(sm, date, t))}</p>
+    </div>
+    <svg class="brief-bars" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="Net per day, last 7 days">
+      <line x1="0" x2="${w}" y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="1"/>${bars}
+    </svg>
+  </div>`;
+}
+
 // ---- month ----
 
 function monthData(st, ym, today){
@@ -1408,6 +1476,7 @@ function renderMain(){
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
       ${m.pendingEarlier>0&&view==="day"?`<button class="link" style="margin-left:0;color:var(--out)" data-view="all">${m.pendingEarlier} unchecked from earlier days</button>`:""}
     </div>
+    ${view==="day"?dayBriefHTML():""}
     ${body}
     ${sectionNavHTML()}
     ${view==="day"?'<button class="fab" id="fab" aria-label="New entry"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button>':""}
@@ -1812,7 +1881,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
 } else {
   s = load();
   date = s.lastDate || todayISO();

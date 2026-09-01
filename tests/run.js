@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -469,6 +469,19 @@ const round2 = n => Math.round(n * 100) / 100;
   const h = settlePending(st, "h1", "2026-09-08");
   assert("same-day settle stamps today", h.settle === "2026-09-08");
   assert("already-settled entries are left alone", settlePending(st, "h1", "2026-09-09") === null);
+}
+
+// 24. Day in brief: counts, typical-day context, biggest item, open items
+{
+  const st = structuredClone(SEED);
+  st.items[1].checked = true; // Chargeblast paid on Aug 31
+  const sm = daySummary(st, '2026-08-31');
+  assert('brief counts the day', sm.count === 2 && sm.pending.length === 1 && Math.round(sm.outC*100)/100 === 1545 && Math.round(sm.net*100)/100 === -1545);
+  assert('biggest item is the largest amount', sm.biggest.name === 'Chapa - rent' || sm.biggest.usd === 1799.8560115190785);
+  assert('seven bars ending on the day', sm.bars.length === 7 && sm.bars[6].date === '2026-08-31' && Math.round(sm.bars[6].net*100)/100 === -1545);
+  const text = dayBriefText(sm, '2026-08-31', '2026-09-01');
+  assert('brief text names the open item and the net', text.includes('Still open: Chapa - rent') && text.includes('down US$1,545.00'));
+  assert('empty days read naturally', dayBriefText(daySummary(st, '2026-09-05'), '2026-09-05', '2026-09-01') === 'Nothing planned yet.');
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
