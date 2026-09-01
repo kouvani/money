@@ -58,6 +58,27 @@ button{cursor:pointer}
 .pulse .ptext{font-size:12.5px;color:var(--muted)}
 .pulse .ptext.low{color:var(--out)}
 .pstack{display:flex;flex-direction:column;gap:4px;min-width:0}
+.navbar{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:44px}
+.navbtn{display:flex;align-items:center;justify-content:center;gap:9px;padding:14px 10px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);color:var(--ink);font-size:13px;font-weight:500;box-shadow:var(--shadow);transition:transform .15s ease,box-shadow .2s ease,background .15s ease}
+.navbtn svg{color:var(--muted);flex-shrink:0}
+.navbtn:hover{transform:translateY(-2px)}
+.navbtn:active{transform:scale(.98)}
+.btn2{background:var(--card);color:var(--ink);border:1px solid var(--line)}
+.ggrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.gcard{position:relative;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px 20px 16px}
+.gcard .x{position:absolute;top:12px;right:12px;opacity:0}
+.gcard:hover .x{opacity:1}
+.gstate{font-size:11.5px;font-weight:600;white-space:nowrap}
+.gbig{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:8px 0 0}
+.gbig .gof{font-size:13.5px;color:var(--muted);font-weight:500;letter-spacing:0}
+.gtrack{height:6px;background:var(--surface);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:13px 0 10px}
+.gtrack>span{display:block;height:100%;background:var(--in);border-radius:4px;transition:width .5s ease}
+.gmeta{font-size:12px;color:var(--muted)}
+.bare-input{flex:1;min-width:0;border:none;background:none;padding:4px 6px;margin-left:-6px;font-size:14.5px;font-weight:500;border-radius:7px}
+.bare-input:hover{background:var(--surface)}
+.bare-input:focus{background:var(--card);box-shadow:var(--ring)}
+.kindsel{width:auto;padding:4px 8px;font-size:11.5px;color:var(--muted);border-radius:7px}
+@media (max-width:640px){.navbar{grid-template-columns:1fr 1fr}}
 .gbar{display:block;width:200px;max-width:60vw;height:3px;background:var(--surface);border:1px solid var(--line);border-radius:3px;overflow:hidden}
 .gbar>span{display:block;height:100%;background:var(--in);border-radius:3px;transition:width .5s ease}
 .runway{margin-top:10px;font-size:12.5px;color:var(--muted)}

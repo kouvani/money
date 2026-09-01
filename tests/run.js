@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -320,6 +320,30 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("vacated day is skipped for regeneration", v.skipDates.includes("2026-09-27"));
   generateRecurring(st, "2026-09-01", null);
   assert("moved bill doesn't duplicate back", st.items.filter(x=>x.vendorId===v.id && x.date==="2026-09-27").length === 0);
+}
+
+// 19. Deleting vendors and accounts never touches the entries themselves
+{
+  const st = structuredClone(SEED);
+  const v = upsertVendorFromEntry(st, st.items[1]); // Chargeblast
+  v.cadence = "monthly"; v.dayOfMonth = 27; v.skipDates = [];
+  generateRecurring(st, "2026-09-01", null);
+  const genCount = st.items.filter(x=>x.recurringSourceId===v.id).length;
+  assert("setup generated future bills", genCount > 0);
+  deleteVendor(st, v.id, "2026-09-01");
+  assert("vendor gone, real entries kept, future generated dropped",
+    st.vendors.every(z=>z.id!==v.id) && st.items.some(x=>x.name==="Chargeblast (5 bills)")
+    && st.items.every(x=>x.vendorId!==v.id && x.recurringSourceId!==v.id));
+
+  st.accounts = [{ id: "aa", name: "Mercury", kind: "business", color: "#1C6B5E", start: 100 }];
+  st.items[0].accountId = "aa";
+  deleteAccount(st, "aa");
+  assert("account gone, entry kept without a link", st.accounts.length === 0 && st.items[0].accountId === null && st.items[0].name === "Chapa - rent");
+
+  const cleaned = ensure({ version: 6, accounts: [], vendors: [],
+    items: [{ id: "z1", kind: "out", date: "2026-09-01", name: "Ghost", usd: 5, cadFixed: null, checked: false, accountId: "gone", vendorId: "gone", note: "", receiptUrl: "", recurringSourceId: "gone" }],
+    settings: { procSeeded: true } });
+  assert("dangling links dissolve on load", cleaned.items[0].accountId === null && cleaned.items[0].vendorId === null && cleaned.items[0].recurringSourceId === null);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

@@ -88,7 +88,33 @@ function ensure(st){
       if (v) x.vendorId = v.id;
     }
   });
+  // references to deleted vendors/accounts dissolve quietly
+  const vids = new Set(st.vendors.map(v => v.id)), aids = new Set(st.accounts.map(a => a.id));
+  st.items.forEach(x => {
+    if (x.vendorId && !vids.has(x.vendorId)) x.vendorId = null;
+    if (x.accountId && !aids.has(x.accountId)) x.accountId = null;
+    if (x.recurringSourceId && !vids.has(x.recurringSourceId)) x.recurringSourceId = null;
+  });
+  st.vendors.forEach(v => { if (v.defaultAccountId && !aids.has(v.defaultAccountId)) v.defaultAccountId = null; });
   return st;
+}
+
+// Deleting a vendor keeps every entry; they just lose the link.
+function deleteVendor(st, id, today){
+  const v = st.vendors.find(z => z.id === id);
+  if (!v) return;
+  if (v.cadence) stopRecurring(st, v, shift(today, 1));
+  st.items.forEach(x => {
+    if (x.vendorId === id) x.vendorId = null;
+    if (x.recurringSourceId === id) x.recurringSourceId = null;
+  });
+  st.vendors = st.vendors.filter(z => z.id !== id);
+}
+
+function deleteAccount(st, id){
+  st.accounts = st.accounts.filter(a => a.id !== id);
+  st.items.forEach(x => { if (x.accountId === id) x.accountId = null; });
+  st.vendors.forEach(v => { if (v.defaultAccountId === id) v.defaultAccountId = null; });
 }
 
 function accountBalance(st, a){
@@ -348,9 +374,7 @@ function sparkSVG(sd){
 
 function goalInfo(st, g, today){
   const cash = calc(st, today).allTime;
-  const base = Math.min(g.startUsd, g.targetUsd);
-  const denom = g.targetUsd - base || 1;
-  const pct = Math.max(0, Math.min(1, (cash - base) / denom));
+  const pct = Math.max(0, Math.min(1, cash / (g.targetUsd || 1)));
   const reached = cash >= g.targetUsd;
   const daysLeft = Math.max(0, dayDiff(today, g.targetDate));
   const needPerDay = reached || daysLeft === 0 ? 0 : (g.targetUsd - cash) / daysLeft;
@@ -659,30 +683,42 @@ function renderGoals(){
   document.getElementById("app").innerHTML = `
     <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
     <div class="lt" style="font-size:20px;margin-bottom:4px">Goals</div>
-    <div class="hint" style="padding-left:0;margin-bottom:14px">A cash figure to reach by a date. Progress follows your real balance.</div>
-    ${s.goals.length?s.goals.map(g=>{
+    <div class="hint" style="padding-left:0;margin-bottom:18px">A cash figure to reach by a date. Progress follows your real balance.</div>
+    ${s.goals.length?`<div class="ggrid">${s.goals.map(g=>{
       const gi = goalInfo(s, g, t);
-      const status = gi.reached ? "reached"
-        : gi.daysLeft === 0 ? "past its date"
-        : `${gi.daysLeft} days left · needs +${fmt(gi.needPerDay,"")}/day · pace ${gi.pace>=0?"+":""}${fmt(gi.pace,"")}/day`;
-      return `<div class="row" style="cursor:default;flex-wrap:wrap">
-        <div class="name">${g.name?esc(g.name):fmt(g.targetUsd)}<span class="tinytag">${prettyShort(g.targetDate)}</span></div>
-        <div class="amt num" style="font-weight:600;color:${gi.reached?"var(--in)":"var(--ink)"}">${fmt(gi.cash)} / ${fmt(g.targetUsd)}</div>
-        <button class="x" data-goal-remove="${g.id}" title="Remove" aria-label="Remove goal">×</button>
-        <div style="flex-basis:100%;display:flex;align-items:center;gap:10px;padding:4px 0 2px 0">
-          <span class="gbar" style="flex:1;max-width:none"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>
-          <span class="sub num" style="margin:0;white-space:nowrap;${gi.behind?"color:var(--out)":""}">${Math.round(gi.pct*100)}% · ${status}</span>
+      const state = gi.reached
+        ? '<span class="gstate" style="color:var(--in)">reached</span>'
+        : gi.daysLeft === 0
+          ? '<span class="gstate" style="color:var(--out)">past its date</span>'
+          : gi.behind
+            ? '<span class="gstate" style="color:var(--out)">behind pace</span>'
+            : '<span class="gstate" style="color:var(--in)">on pace</span>';
+      const meta = gi.reached
+        ? `Reached with ${fmt(gi.cash)} on hand.`
+        : gi.daysLeft === 0
+          ? `${fmt(g.targetUsd - gi.cash)} short of the date.`
+          : `${prettyShort(g.targetDate)} · ${gi.daysLeft} ${gi.daysLeft===1?"day":"days"} left · needs +${fmt(gi.needPerDay,"")}/day · pace ${gi.pace>=0?"+":"−"}${fmt(Math.abs(gi.pace),"")}/day`;
+      return `<div class="gcard">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+          <div class="name" style="font-weight:600;font-size:15px">${g.name?esc(g.name):"Cash target"}</div>
+          ${state}
         </div>
+        <div class="gbig num">${fmt(gi.cash)} <span class="gof">of ${fmt(g.targetUsd)}</span></div>
+        <div class="gtrack" role="progressbar" aria-valuenow="${Math.round(gi.pct*100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(gi.pct*100).toFixed(1)}%;${gi.behind&&!gi.reached?"background:var(--out)":""}"></span></div>
+        <div class="gmeta num">${meta}</div>
+        <button class="x" data-goal-remove="${g.id}" title="Remove" aria-label="Remove goal">×</button>
       </div>`;
-    }).join(""):'<div class="empty">No goals yet. Set one below.</div>'}
-    <div class="addrow" style="margin-top:26px">
-      <div class="addgrid" style="grid-template-columns:1fr 120px 150px auto">
+    }).join("")}</div>`:'<div class="empty" style="border:none;padding-left:0">Nothing to aim at yet. Set the first one below.</div>'}
+    <div class="addrow" style="margin-top:28px;border:none;padding:0">
+      <div class="addgrid" style="grid-template-columns:1fr 130px 160px auto">
         <input id="goalName" placeholder="Reserve cushion" aria-label="Goal name (optional)">
         <input id="goalAmt" type="number" step="0.01" placeholder="20000" style="text-align:right" aria-label="Target amount USD">
         <input id="goalDate" type="date" style="width:100%;font-weight:400;font-size:14px" aria-label="Target date">
-        <button class="btn" id="goalAdd">Add</button>
+        <button class="btn" id="goalAdd">Set goal</button>
       </div>
-    </div>`;
+    </div>
+    ${undoChipHTML()}`;
+  bindUndo();
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
   document.querySelectorAll("[data-goal-remove]").forEach(b=>b.onclick=()=>{
     armUndo(structuredClone(s));
@@ -741,6 +777,7 @@ function renderSettings(){
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
         <button class="btn" id="exportJson">Download backup</button>
+        <button class="btn btn2" id="exportCsvBtn">Export CSV</button>
         <span class="sub" style="margin:0">Last backup: ${last?prettyShort(last):"never"}</span>
       </div>
       <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -779,6 +816,7 @@ function renderSettings(){
     </div>`;
   document.getElementById("back").onclick = ()=>{ pendingImport=null; view="day"; render(); };
   document.getElementById("exportJson").onclick = exportJson;
+  document.getElementById("exportCsvBtn").onclick = exportCsv;
   const dis = document.getElementById("dismissBackup");
   if (dis) dis.onclick = ()=>{ s.settings.backupDismissedAt = t; save(); render(); };
   document.getElementById("importFile").onchange = e=>{
@@ -832,8 +870,13 @@ function renderAccounts(){
         : `<button class="bare num" data-accedit="${a.id}" style="font-size:15px;font-weight:600;color:${bal<0?"var(--out)":"var(--ink)"}">${fmt(bal)}<span class="tinylink">edit</span></button>`;
       return `<div class="row" style="cursor:default">
         <div class="sw" style="background:${a.color}"></div>
-        <div class="name">${esc(a.name)}<span class="tinytag">${a.kind}</span></div>
+        <input class="bare-input" data-acc-name="${a.id}" value="${esc(a.name)}" aria-label="Name of ${esc(a.name)}">
+        <select class="kindsel" data-acc-kind="${a.id}" aria-label="Type of ${esc(a.name)}">
+          <option value="business" ${a.kind==="business"?"selected":""}>business</option>
+          <option value="personal" ${a.kind==="personal"?"selected":""}>personal</option>
+        </select>
         <div class="amt">${balCell}</div>
+        <button class="x" data-acc-remove="${a.id}" title="Remove" aria-label="Remove ${esc(a.name)}">×</button>
       </div>`;
     }).join(""):'<div class="empty">No accounts yet.</div>'}
     <div class="summary num" style="margin-top:14px">
@@ -846,9 +889,23 @@ function renderAccounts(){
         <select id="accKind" aria-label="Account type"><option value="business">business</option><option value="personal">personal</option></select>
         <button class="btn" id="accAdd">Add</button>
       </div>
-    </div>`;
+    </div>
+    ${undoChipHTML()}`;
+  bindUndo();
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
   document.querySelectorAll("[data-afilter]").forEach(b=>b.onclick=()=>{ accountsFilter=b.dataset.afilter; render(); });
+  document.querySelectorAll("[data-acc-name]").forEach(el=>{
+    el.onchange = ()=>{ const a=s.accounts.find(z=>z.id===el.dataset.accName); const v=el.value.trim(); if(v){ a.name=v; save(); } render(); };
+    el.onkeydown = e=>{ if(e.key==="Enter") el.blur(); };
+  });
+  document.querySelectorAll("[data-acc-kind]").forEach(el=>{
+    el.onchange = ()=>{ const a=s.accounts.find(z=>z.id===el.dataset.accKind); a.kind=el.value; save(); render(); };
+  });
+  document.querySelectorAll("[data-acc-remove]").forEach(b=>b.onclick=()=>{
+    armUndo(structuredClone(s));
+    deleteAccount(s, b.dataset.accRemove);
+    save(); render();
+  });
   document.querySelectorAll("[data-accedit]").forEach(b=>b.onclick=()=>{ editAccId=b.dataset.accedit; render(); document.getElementById("accDraft").focus(); });
   document.querySelectorAll("[data-accsave]").forEach(b=>{
     const doSave = ()=>{
@@ -875,6 +932,20 @@ function renderAccounts(){
 
 function datalistHTML(){
   return `<datalist id="vendorNames">${s.vendors.map(v=>`<option value="${esc(v.name)}">`).join("")}</datalist>`;
+}
+
+const NAV_ICONS = {
+  accounts: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6L8 2.8 13.5 6M3.5 6v6M6.5 6v6M9.5 6v6M12.5 6v6M2.5 13.2h11"/></svg>',
+  vendors: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 5.8h9.6l-1-3H4.2l-1 3zM3.8 5.8v7.4h8.4V5.8M6.6 13.2V9.4h2.8v3.8"/></svg>',
+  goals: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 13.8V2.6M4.2 3.2h7.6l-1.7 2.6 1.7 2.6H4.2"/></svg>',
+  settings: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2.5 5h11M2.5 11h11"/><circle cx="6" cy="5" r="1.7"/><circle cx="10" cy="11" r="1.7"/></svg>',
+};
+
+function sectionNavHTML(){
+  return `<nav class="navbar" aria-label="Sections">
+    ${[["accounts","Accounts"],["vendors","Vendors"],["goals","Goals"],["settings","Settings"]]
+      .map(([k,label])=>`<button class="navbtn" data-nav="${k}">${NAV_ICONS[k]}<span>${label}</span></button>`).join("")}
+  </nav>`;
 }
 
 function renderMain(){
@@ -983,16 +1054,12 @@ function renderMain(){
       ${m.pendingEarlier>0&&view==="day"?`<button class="link" style="margin-left:0;color:var(--out)" data-view="all">${m.pendingEarlier} unchecked from earlier days</button>`:""}
     </div>
     ${body}
+    ${sectionNavHTML()}
     </div>
     <div class="foot">
       1 USD = ${s.rate.toFixed(4)} CAD<button class="link" id="rateToggle">change</button>
       ${showRate?`<input id="rateInput" type="number" step="0.0001" value="${s.rate}" style="width:110px;margin-left:10px;display:inline-block;padding:5px 8px" aria-label="USD to CAD rate">`:""}
       <span style="margin-left:18px">Started ${pretty(s.startDate)} with ${fmt(s.startBudget)}</span>
-      <button class="link" id="accountsLink">accounts</button>
-      <button class="link" id="vendorsLink">vendors</button>
-      <button class="link" id="goalsLink">goals</button>
-      <button class="link" id="settingsLink">settings</button>
-      <button class="link" id="export">export CSV</button>
     </div>
     ${undoChipHTML()}`;
   bindMain();
@@ -1096,9 +1163,32 @@ function renderVendors(){
       <div class="row" style="cursor:default">
         <div class="name"><button class="namebtn" data-vopen="${v.id}">${esc(v.name)}</button>${v.isProcessor?'<span class="tinytag">processor</span>':""}</div>
         <div class="sub num" style="margin:0">${st.count} ${st.count===1?"entry":"entries"} · ${fmt(st.doneAll)} · ${st.last?prettyShort(st.last):"—"}</div>
-      </div>`).join(""):'<div class="empty">No vendors yet. They appear as you log entries.</div>'}
-  `;
+        <button class="x" data-ven-remove="${v.id}" title="Remove" aria-label="Remove ${esc(v.name)}">×</button>
+      </div>`).join(""):'<div class="empty">No vendors yet. They appear as you log entries, or add one below.</div>'}
+    <div class="addrow" style="margin-top:26px">
+      <div class="addgrid" style="grid-template-columns:1fr auto">
+        <input id="venName" placeholder="Adyen" aria-label="Vendor name">
+        <button class="btn" id="venAdd">Add</button>
+      </div>
+    </div>
+    ${undoChipHTML()}`;
+  bindUndo();
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
+  document.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
+  document.querySelectorAll("[data-ven-remove]").forEach(b=>b.onclick=()=>{
+    armUndo(structuredClone(s));
+    deleteVendor(s, b.dataset.venRemove, todayISO());
+    save(); render();
+  });
+  const venAdd = ()=>{
+    const name = document.getElementById("venName").value.trim();
+    if (!name) return;
+    if (!findVendorByName(s, name)) s.vendors.push({ id: uid("v"), name, note: "", defaultKind: "out", defaultAccountId: null,
+      defaultAmountUsd: 0, cadFixed: null, cadence: null, dayOfMonth: null, url: "", skipDates: [], isProcessor: false });
+    save(); render();
+  };
+  document.getElementById("venAdd").onclick = venAdd;
+  document.getElementById("venName").onkeydown = e=>{ if(e.key==="Enter") venAdd(); };
 }
 
 function cadNote(kind){
@@ -1291,11 +1381,7 @@ function bindMain(){
     $("allList").innerHTML = allListHTML();
     bindShared();
   };
-  $("accountsLink").onclick = ()=>{ view="accounts"; render(); };
-  $("vendorsLink").onclick = ()=>{ view="vendors"; render(); };
-  $("goalsLink").onclick = ()=>{ view="goals"; render(); };
-  $("settingsLink").onclick = ()=>{ view="settings"; render(); };
-  $("export").onclick = exportCsv;
+  app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ view=b.dataset.nav; render(); });
 }
 
 function add(kind){
@@ -1318,7 +1404,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount };
 } else {
   s = load();
   date = s.lastDate || todayISO();
