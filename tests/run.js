@@ -251,6 +251,23 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("unchecking keeps the settled-at record", x.checked === false && x.settle === "2026-09-07");
 }
 
+// 15. Known processing names are flagged as processors and old entries join them by name
+{
+  const st = ensure({ version: 6, accounts: [],
+    vendors: [{ id: "ve", name: "ems", note: "", defaultKind: "in", defaultAccountId: null, defaultAmountUsd: 500, cadFixed: null, cadence: null, dayOfMonth: null, url: "", skipDates: [], isProcessor: false }],
+    items: [{ id: "i1", kind: "in", date: "2026-08-31", name: "BANKCARD DEPOSIT", usd: 900, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null }],
+    settings: {} });
+  assert("existing vendor flagged case-insensitively", st.vendors.find(v=>v.name==="ems").isProcessor === true);
+  const names = st.vendors.map(v=>v.name);
+  assert("missing processor vendors are created", ["PHOENIX ECOMMERCE","GATEWAY SERVICES","BANKCARD DEPOSIT"].every(n=>names.includes(n)));
+  assert("no duplicate for the existing one", st.vendors.filter(v=>v.name.toLowerCase()==="ems").length === 1);
+  assert("old entries link to their vendor by name", st.items[0].vendorId === st.vendors.find(v=>v.name==="BANKCARD DEPOSIT").id);
+  // manual un-flag survives the next load
+  st.vendors.find(v=>v.name==="ems").isProcessor = false;
+  const again = ensure(structuredClone(st));
+  assert("turning a processor off sticks across loads", again.vendors.find(v=>v.name==="ems").isProcessor === false);
+}
+
 // 4. Offline shell: every file the service worker precaches exists on disk
 {
   const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");

@@ -12,6 +12,7 @@ const SEED = {
   ],
   settings: { theme: "system", currencyDisplay: "both", warnDaysAhead: 3 },
 };
+const PROCESSOR_NAMES = ["EMS", "PHOENIX ECOMMERCE", "GATEWAY SERVICES", "BANKCARD DEPOSIT"];
 const pad = n => String(n).padStart(2, "0");
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
 const shift = (iso, n) => { const [y,m,d] = iso.split("-").map(Number); const t = new Date(y, m-1, d+n); return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`; };
@@ -66,6 +67,26 @@ function ensure(st){
     a.color = a.color ?? palette[i % palette.length];
     a.start = typeof a.start === "number" ? a.start : 0;
   });
+  // known processing/fee names get flagged as processors, once; manual changes stick after that
+  if (!st.settings.procSeeded) {
+    for (const name of PROCESSOR_NAMES) {
+      let v = st.vendors.find(z => z.name.toLowerCase() === name.toLowerCase());
+      if (!v) {
+        v = { id: uid("v"), name, note: "", defaultKind: name === "GATEWAY SERVICES" ? "out" : "in", defaultAccountId: null,
+              defaultAmountUsd: 0, cadFixed: null, cadence: null, dayOfMonth: null, url: "", skipDates: [], isProcessor: true };
+        st.vendors.push(v);
+      }
+      v.isProcessor = true;
+    }
+    st.settings.procSeeded = true;
+  }
+  // entries that predate vendors join their vendor by name
+  st.items.forEach(x => {
+    if (x.vendorId == null) {
+      const v = st.vendors.find(z => z.name.toLowerCase() === x.name.trim().toLowerCase());
+      if (v) x.vendorId = v.id;
+    }
+  });
   return st;
 }
 
@@ -81,7 +102,7 @@ function load(){
     const legacy = localStorage.getItem(LEGACY_KEY);
     if (legacy) return migrate(JSON.parse(legacy));
   } catch(e){ console.error(e); }
-  return structuredClone(SEED);
+  return ensure(structuredClone(SEED));
 }
 
 let s, date;
