@@ -83,6 +83,7 @@ function load(){
 
 let s, date;
 let view = "day";
+let searchQ = "";
 let openVendorId = null;
 let deleteAsk = null;
 let expandedId = null;
@@ -296,6 +297,20 @@ function monthHTML(){
   </div>`;
 }
 
+// ---- search ----
+
+function matchesSearch(st, x, q){
+  q = String(q).trim().toLowerCase();
+  if (!q) return true;
+  const vendor = x.vendorId ? st.vendors.find(v => v.id === x.vendorId) : null;
+  const hay = [
+    x.name, x.note, vendor ? vendor.name : "",
+    round2(x.usd).toFixed(2), String(round2(x.usd)),
+    x.cadFixed != null ? round2(x.cadFixed).toFixed(2) : "",
+  ].join("\n").toLowerCase();
+  return hay.includes(q);
+}
+
 // ---- rows ----
 
 const RMARK = `<svg class="rmark" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Repeats"><path d="M10.2 6A4.2 4.2 0 1 1 8.9 2.9"/><path d="M9.2 0.9l0.4 2.2-2.2 0.4"/></svg>`;
@@ -314,16 +329,18 @@ function rowHTML(x){
   const sign = x.kind==="in" ? "+" : "−";
   const cad = x.cadFixed!=null ? x.cadFixed : x.usd*s.rate;
   const detail = expandedId === x.id ? `<div class="detail">
-    <label class="sub" style="margin:0">Account
+    ${s.accounts.length?`<label class="sub" style="margin:0">Account
       <select data-acc="${x.id}" aria-label="Account for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
         <option value="">none</option>
         ${s.accounts.map(a=>`<option value="${a.id}" ${x.accountId===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
       </select>
-    </label>
+    </label>`:""}
+    <input data-note="${x.id}" value="${esc(x.note)}" placeholder="Note" aria-label="Note for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
+    <input data-receipt="${x.id}" value="${esc(x.receiptUrl)}" placeholder="Receipt link" aria-label="Receipt link for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
   </div>` : "";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${dueMark(x, todayISO())}</div>
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${dueMark(x, todayISO())}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
@@ -347,6 +364,13 @@ function listHTML(kind, items){
       <div class="cadnote" data-cadnote="${kind}"${d.cur==="CAD"&&a>0?"":" hidden"}>${d.cur==="CAD"&&a>0?`${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.`:""}</div>
     </div>
   </div>`;
+}
+
+function allListHTML(){
+  const list = s.items.filter(x => matchesSearch(s, x, searchQ));
+  if (!s.items.length) return '<div style="color:var(--muted)">Nothing logged on any day yet.</div>';
+  if (!list.length) return '<div style="color:var(--muted)">Nothing matches.</div>';
+  return groupedItemsHTML(list);
 }
 
 function groupedItemsHTML(list){
@@ -453,8 +477,10 @@ function renderMain(){
   } else if (view==="month") {
     body = monthHTML();
   } else {
-    body = `<div style="margin-top:36px">${m.dates.length?"":'<div style="color:var(--muted)">Nothing logged on any day yet.</div>'}
-      ${groupedItemsHTML(s.items)}</div>`;
+    body = `<div style="margin-top:36px">
+      <input id="search" type="search" value="${esc(searchQ)}" placeholder="Search name, vendor, note, amount" aria-label="Search entries" style="max-width:340px">
+      <div id="allList" style="margin-top:18px">${allListHTML()}</div>
+    </div>`;
   }
 
   document.getElementById("app").innerHTML = `
@@ -633,6 +659,14 @@ function bindShared(){
       save(); render();
     };
   });
+  app.querySelectorAll("[data-note]").forEach(el=>{
+    el.oninput = ()=>{ const x=s.items.find(i=>i.id===el.dataset.note); x.note = el.value; save(); };
+    el.onkeydown = e=>{ if(e.key==="Escape"||e.key==="Enter"){ expandedId=null; render(); } };
+  });
+  app.querySelectorAll("[data-receipt]").forEach(el=>{
+    el.onchange = ()=>{ const x=s.items.find(i=>i.id===el.dataset.receipt); x.receiptUrl = el.value.trim(); save(); };
+    el.onkeydown = e=>{ if(e.key==="Escape"||e.key==="Enter"){ const x=s.items.find(i=>i.id===el.dataset.receipt); x.receiptUrl = el.value.trim(); expandedId=null; save(); render(); } };
+  });
   app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ date=b.dataset.open; view="day"; save(); render(); });
   app.querySelectorAll("[data-vopen-item]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -684,6 +718,11 @@ function bindMain(){
     $("saveStart").onclick=doSave; $("startDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editStart=false; render(); } }; }
   $("rateToggle").onclick = ()=>{ showRate=!showRate; render(); };
   if ($("rateInput")) $("rateInput").oninput = e=>{ s.rate=parseFloat(e.target.value)||1; save(); const keep=e.target; const v=keep.value; render(); const again=$("rateInput"); if(again){ again.value=v; again.focus(); } };
+  if ($("search")) $("search").oninput = e=>{
+    searchQ = e.target.value;
+    $("allList").innerHTML = allListHTML();
+    bindShared();
+  };
   $("accountsLink").onclick = ()=>{ view="accounts"; render(); };
   $("vendorsLink").onclick = ()=>{ view="vendors"; render(); };
   $("export").onclick = exportCsv;
@@ -709,7 +748,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch };
 } else {
   s = load();
   date = s.lastDate || todayISO();

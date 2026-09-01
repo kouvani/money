@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -161,6 +161,19 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("runway counts only checked entries in the last 30 days", r.burning && r.days === 50);
   st.items.push(mk("w5", "in", "2026-08-30", 2000, true));
   assert("positive 30-day net means no burn", runwayInfo(st, "2026-09-01").burning === false);
+}
+
+// 10. Search matches name, vendor, note, and amount
+{
+  const st = structuredClone(SEED);
+  st.vendors = [{ id: "v1", name: "Chargeblast", note: "", defaultKind: "out", defaultAccountId: null, defaultAmountUsd: 309, cadFixed: null, cadence: null, dayOfMonth: null, url: "", skipDates: [] }];
+  const x = { id: "s1", kind: "out", date: "2026-08-31", name: "5 bills", usd: 1545, cadFixed: null, checked: false, accountId: null, vendorId: "v1", note: "august batch", receiptUrl: "", recurringSourceId: null };
+  assert("search by name", matchesSearch(st, x, "bills"));
+  assert("search by vendor", matchesSearch(st, x, "chargeblast"));
+  assert("search by note", matchesSearch(st, x, "august"));
+  assert("search by amount", matchesSearch(st, x, "1545"));
+  assert("search misses cleanly", !matchesSearch(st, x, "regus"));
+  assert("empty query matches all", matchesSearch(st, x, "  "));
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
