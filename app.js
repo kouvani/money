@@ -434,6 +434,32 @@ function render(){
 
 let pendingImport = null;
 let importError = false;
+let undoBuf = null;
+
+function applyTheme(){
+  const t = s.settings.theme;
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+
+// Any delete can be taken back for 6 seconds.
+function armUndo(snapshot){
+  if (undoBuf) clearTimeout(undoBuf.timer);
+  undoBuf = { snapshot, timer: setTimeout(()=>{ undoBuf = null; render(); }, 6000) };
+}
+
+function undoChipHTML(){
+  return undoBuf ? `<div class="undo num" role="status">Deleted.<button id="undoBtn" class="link" style="color:var(--paper)">Undo</button></div>` : "";
+}
+
+function bindUndo(){
+  const b = document.getElementById("undoBtn");
+  if (b) b.onclick = ()=>{
+    clearTimeout(undoBuf.timer);
+    s = undoBuf.snapshot; undoBuf = null;
+    save(); render();
+  };
+}
 
 function renderSettings(){
   const t = todayISO();
@@ -469,6 +495,18 @@ function renderSettings(){
       <label class="sub" style="margin:0">Due-soon marks show
         <input id="warnDays" type="number" min="0" max="30" value="${s.settings.warnDaysAhead}" style="width:60px;margin:0 6px;padding:5px 8px;font-size:12.5px" aria-label="Days ahead for due marks">
       days ahead</label>
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <label class="sub" style="margin:0">Appearance
+        <select id="themeSel" aria-label="Theme" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
+          <option value="system" ${s.settings.theme==="system"?"selected":""}>follow the system</option>
+          <option value="light" ${s.settings.theme==="light"?"selected":""}>light</option>
+          <option value="dark" ${s.settings.theme==="dark"?"selected":""}>dark</option>
+        </select>
+      </label>
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <div class="sub" style="margin:0">Keyboard: n new entry · ← → change day · t today · / search · Esc cancel</div>
     </div>`;
   document.getElementById("back").onclick = ()=>{ pendingImport=null; view="day"; render(); };
   document.getElementById("exportJson").onclick = exportJson;
@@ -496,6 +534,10 @@ function renderSettings(){
   document.getElementById("warnDays").onchange = e=>{
     s.settings.warnDaysAhead = Math.min(30, Math.max(0, parseInt(e.target.value, 10) || 0));
     save(); render();
+  };
+  document.getElementById("themeSel").onchange = e=>{
+    s.settings.theme = e.target.value;
+    save(); applyTheme(); render();
   };
 }
 
@@ -627,7 +669,8 @@ function renderMain(){
       <button class="link" id="vendorsLink">vendors</button>
       <button class="link" id="settingsLink">settings</button>
       <button class="link" id="export">export CSV</button>
-    </div>`;
+    </div>
+    ${undoChipHTML()}`;
   bindMain();
 }
 
@@ -671,7 +714,8 @@ function renderVendor(){
       </select>
     </div>`:""}
     ${v.url?`<div class="sub" style="margin-bottom:10px"><a href="${esc(v.url)}" target="_blank" rel="noopener" class="quietlink">open link</a></div>`:""}
-    <div style="margin-top:26px">${list.length?groupedItemsHTML(list):'<div class="empty">Nothing logged yet.</div>'}</div>`;
+    <div style="margin-top:26px">${list.length?groupedItemsHTML(list):'<div class="empty">Nothing logged yet.</div>'}</div>
+    ${undoChipHTML()}`;
   bindShared();
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
   document.getElementById("vNote").oninput = e=>{ v.note = e.target.value; save(); };
@@ -735,17 +779,20 @@ function cadNote(kind){
 // handlers shared by any view that renders entry rows
 function bindShared(){
   const app = document.getElementById("app");
+  bindUndo();
   app.querySelectorAll("[data-toggle]").forEach(c=>c.onchange=()=>{ const x=s.items.find(i=>i.id===c.dataset.toggle); x.checked=!x.checked; save(); render(); });
   app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
     const x = s.items.find(i=>i.id===b.dataset.remove);
     const v = x && x.recurringSourceId ? s.vendors.find(z=>z.id===x.recurringSourceId) : null;
     if (v && v.cadence) { deleteAsk = x.id; render(); return; }
+    armUndo(structuredClone(s));
     s.items=s.items.filter(i=>i.id!==b.dataset.remove); save(); render();
   });
   app.querySelectorAll("[data-del-one]").forEach(b=>b.onclick=()=>{
     const x = s.items.find(i=>i.id===b.dataset.delOne);
     const v = s.vendors.find(z=>z.id===x.recurringSourceId);
+    armUndo(structuredClone(s));
     if (v && !v.skipDates.includes(x.date)) v.skipDates.push(x.date);
     s.items = s.items.filter(i=>i.id!==x.id);
     deleteAsk = null; save(); render();
@@ -753,6 +800,7 @@ function bindShared(){
   app.querySelectorAll("[data-del-stop]").forEach(b=>b.onclick=()=>{
     const x = s.items.find(i=>i.id===b.dataset.delStop);
     const v = s.vendors.find(z=>z.id===x.recurringSourceId);
+    armUndo(structuredClone(s));
     if (v) stopRecurring(s, v, x.date);
     s.items = s.items.filter(i=>i.id!==x.id);
     deleteAsk = null; save(); render();
@@ -865,8 +913,39 @@ if (typeof window === "undefined") {
   s = load();
   date = s.lastDate || todayISO();
   save();
+  applyTheme();
   render();
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     navigator.serviceWorker.register("sw.js").catch(()=>{});
   }
+
+  document.addEventListener("keydown", e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
+    if (e.key === "Escape") {
+      if (deleteAsk || expandedId || editStart || editAccId || pendingImport) {
+        deleteAsk = null; expandedId = null; editStart = false; editAccId = null; pendingImport = null;
+        if (typing) document.activeElement.blur();
+        render();
+      } else if (typing) document.activeElement.blur();
+      return;
+    }
+    if (typing) return;
+    const mainView = view === "day" || view === "month" || view === "all";
+    if (e.key === "n") {
+      e.preventDefault();
+      if (view !== "day") { view = "day"; render(); }
+      document.querySelector('[data-f="name"][data-k="out"]')?.focus();
+    } else if (e.key === "/") {
+      e.preventDefault();
+      if (view !== "all") { view = "all"; render(); }
+      document.getElementById("search")?.focus();
+    } else if (e.key === "t" && mainView) {
+      date = todayISO(); save(); render();
+    } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && mainView) {
+      const n = e.key === "ArrowLeft" ? -1 : 1;
+      date = view === "month" ? addMonths(date, n) : shift(date, n);
+      save(); render();
+    }
+  });
 }
