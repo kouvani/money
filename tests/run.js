@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, calc } = require(path.join(root, "app.js"));
+const { SEED, migrate, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -51,6 +51,26 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("v6 fields exist", Array.isArray(st.accounts) && Array.isArray(st.vendors) && st.settings && st.settings.warnDaysAhead === 3);
   assert("start figures survive", st.startBudget === 8403.01 && st.startDate === "2026-08-31" && st.rate === 1.389);
   assert("migrated state computes the same Left", round2(calc(st, "2026-08-31").end) === 5058.15);
+}
+
+// 5. Vendors: created from entries, defaults remembered, stats answer "what have I paid this year"
+{
+  const st = structuredClone(SEED);
+  const e1 = { id: "a1", kind: "out", date: "2026-01-15", name: "Chargeblast", usd: 300, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null };
+  const v1 = upsertVendorFromEntry(st, e1); st.items.push(e1);
+  assert("vendor auto-created from entry", st.vendors.length === 1 && e1.vendorId === v1.id);
+  assert("vendor defaults remembered", v1.defaultKind === "out" && v1.defaultAmountUsd === 300 && v1.cadFixed === null);
+  const e2 = { id: "a2", kind: "out", date: "2026-08-20", name: "chargeblast", usd: 500, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null };
+  const v2 = upsertVendorFromEntry(st, e2); st.items.push(e2);
+  assert("name match is case-insensitive, no duplicate vendor", st.vendors.length === 1 && v2.id === v1.id);
+  assert("defaults update to the latest entry", v1.defaultAmountUsd === 500);
+  assert("prefill uses the default amount", vendorDefaults(v1).amount === 500 && vendorDefaults(v1).cur === "USD");
+  const stats = vendorStats(st, v1, "2026-09-01");
+  assert("paid this year totals checked entries", stats.doneYear === 800 && stats.doneAll === 800);
+  assert("average and last paid are right", stats.avg === 400 && stats.last === "2026-08-20");
+  const cadVendor = upsertVendorFromEntry(st, { id: "a3", kind: "out", date: "2026-08-31", name: "Chapa - rent", usd: 2500/1.389, cadFixed: 2500, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  assert("CAD-locked vendor prefills in CAD", vendorDefaults(cadVendor).amount === 2500 && vendorDefaults(cadVendor).cur === "CAD");
+  assert("lookup by name works", findVendorByName(st, "  CHARGEBLAST ") === v1);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

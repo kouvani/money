@@ -48,6 +48,13 @@ button{cursor:pointer}
 .row .amt .c{font-size:11.5px;color:var(--muted)}
 .row .x{background:none;border:none;color:var(--muted);font-size:16px;padding:0 2px;line-height:1}
 .empty{padding:18px 0 18px 20px;color:var(--muted);font-size:13.5px;border-top:1px solid var(--line)}
+.namebtn{background:none;border:none;padding:0;font:inherit;color:inherit;text-align:left;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.namebtn:hover{text-decoration:underline}
+.tinytag{font-size:11px;color:var(--muted);margin-left:7px;font-weight:400}
+.tinylink{font-size:11px;color:var(--muted);margin-left:8px;text-decoration:underline;font-weight:400}
+.quietlink{color:var(--muted);font-size:12.5px}
+.vfields{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:16px 0 6px}
+@media (max-width:640px){.vfields{grid-template-columns:1fr}}
 .addrow{border-top:1px solid var(--line);padding-top:12px}
 .addgrid{display:grid;grid-template-columns:1fr 96px 68px auto;gap:6px}
 .cadnote{margin-top:7px;font-size:12px;color:var(--muted)}
