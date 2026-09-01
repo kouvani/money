@@ -194,3 +194,17 @@ button{cursor:pointer}
   .mday{min-height:54px;padding:4px}
   .mend{font-size:9.5px}
 }
+/* alive pass */
+.daytag{display:inline-block;margin-right:9px;padding:2px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:600}
+.daytag.now{background:var(--inSoft);border-color:var(--inSoft);color:var(--in)}
+.row.checking{animation:checkFlash .22s ease}
+.row.fresh{animation:freshRow 1.1s ease}
+.cell.pulse-up{animation:cellPulse .5s ease}
+.cell.pulse-down{animation:cellPulse .5s ease}
+.spot{cursor:crosshair}
+.fab{display:none;position:fixed;right:18px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--ink);color:var(--paper);border:none;box-shadow:var(--shadow);place-items:center;z-index:25;transition:transform .15s ease}
+.fab:active{transform:scale(.92)}
+@keyframes checkFlash{0%{background:transparent}40%{background:var(--surface);transform:translateX(3px)}100%{background:transparent;transform:none}}
+@keyframes freshRow{0%{background:var(--inSoft)}100%{background:transparent}}
+@keyframes cellPulse{0%{transform:scale(1)}35%{transform:scale(1.012)}100%{transform:scale(1)}}
+@media (max-width:640px){.fab{display:grid}body{padding-bottom:96px}}

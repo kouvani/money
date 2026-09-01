@@ -375,7 +375,7 @@ function sparkData(st, today){
   return { past, future };
 }
 
-function sparkSVG(sd){
+function sparkSVG(sd, today){
   const all = [...sd.past, ...sd.future];
   const w = 170, h = 34, p = 3;
   const min = Math.min(...all), max = Math.max(...all);
@@ -390,6 +390,8 @@ function sparkSVG(sd){
     <polyline points="${solid}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
     <polyline points="${dashed}" stroke="var(--muted)" stroke-width="1.3" stroke-dasharray="3 3" stroke-linejoin="round" stroke-linecap="round" opacity=".75"/>
     <circle cx="${X(sd.past.length-1).toFixed(1)}" cy="${Y(sd.past[sd.past.length-1]).toFixed(1)}" r="2.4" fill="${color}"/>
+    ${today ? all.map((v, i) => { const d = i < sd.past.length ? shift(today, -(sd.past.length - 1 - i)) : shift(today, i - sd.past.length + 1);
+      return `<circle class="spot" cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="5" fill="transparent"><title>${prettyShort(d)} · ${fmtP(v)}${i >= sd.past.length ? " (projected)" : ""}</title></circle>`; }).join("") : ""}
   </svg>`;
 }
 
@@ -447,6 +449,7 @@ function paintNum(id, val, fmtFn){
   prevNums[id] = val;
   el.textContent = fmtFn(val);
   if (from == null || from === val || reduced() || lastAnimDate !== date) return;
+  if (id === "numLeft") { const cell = el.closest(".cell"); if (cell) { cell.classList.add(val > from ? "pulse-up" : "pulse-down"); } }
   const t0 = performance.now(), dur = 420;
   const tick = now => {
     if (document.getElementById(id) !== el) return;
@@ -827,6 +830,7 @@ function rowHTML(x){
     <label class="sub" style="margin:0">Day
       <input type="date" data-redate="${x.id}" value="${x.date}" aria-label="Day for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px;font-weight:400">
       <button class="link" data-yesterday="${x.id}" style="margin-left:6px">yesterday</button>
+      <button class="link" data-again="${x.id}" style="margin-left:6px">log again today</button>
     </label>
     <label class="sub" style="margin:0">Settlement
       <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
@@ -838,7 +842,7 @@ function rowHTML(x){
     </label>
   </div>` : "";
   const authorized = !x.checked && x.settle === "pending";
-  return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
+  return `<label class="row ${x.checked?"done":""}${x.id===lastAddedId?" fresh":""}" data-id="${x.id}">
     <span class="drag" draggable="true" data-drag="${x.id}" title="Drag to reorder"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg></span>
     <input type="checkbox" ${x.checked?"checked":""} ${authorized?'data-ind="1"':""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":authorized?"authorized, waiting to settle — check when it settles":"expected"}">
     <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${dueMark(x, todayISO())}${lag?`<button class="lagchip" data-lag="${x.id}" title="This vendor usually authorizes earlier — move it there">${dayDiff(lag, x.date)===1?"yesterday?":prettyShort(lag)+"?"}</button>`:""}</div>
@@ -869,7 +873,7 @@ function listHTML(kind, items){
   return `<div>
     <div class="lh"><div class="sw" style="background:${isIn?"var(--in)":"var(--out)"}"></div><div class="lt">${isIn?"Coming in":"Going out"}</div></div>
     <div class="hint">${isIn?"Check it when the money lands":"Check it when you pay it"}</div>
-    ${items.length?`<div data-rows="${kind}">${stackedRows(items, kind, kind==="out")}</div>`:'<div class="empty">Nothing on this day.</div>'}
+    ${items.length?`<div data-rows="${kind}">${stackedRows(items, kind, kind==="out")}</div>`:`<div class="empty">${date===todayISO()?"Quiet so far today.":date<todayISO()?"Nothing moved.":"Nothing planned yet."}</div>`}
     <div class="addrow">
       <div class="addgrid">
         <input data-f="name" data-k="${kind}" value="${esc(d.name)}" placeholder="${isIn?"Shopify payout":"Meta ads"}" aria-label="Name" autocomplete="off">
@@ -899,6 +903,8 @@ function groupedItemsHTML(list){
 
 let lastRenderedView = null;
 let showPendTray = false;
+let lastAddedId = null;
+function gotoDate(d){ date=d; editCarry=false; showDone={in:false,out:false,proc:false}; showPendTray=false; save(); render(); }
 
 function render(){
   if (generateRecurring(s, todayISO(), shift(date, 32)) > 0) save();
@@ -1353,7 +1359,9 @@ function renderMain(){
       <div class="tabs"><button class="tab ${view==="day"?"on":""}" data-view="day">This day</button><button class="tab ${view==="month"?"on":""}" data-view="month">Month</button><button class="tab ${view==="all"?"on":""}" data-view="all">All days</button></div>
     </div>
     <div id="page" class="${slideCls}">
-    <div class="dayhead">${pretty(date)}</div>
+    <div class="dayhead">${(()=>{ const d = dayDiff(todayISO(), date);
+      const tag = d===0?"Today":d===-1?"Yesterday":d===1?"Tomorrow":d<0?`${-d} days ago`:`In ${d} days`;
+      return `<span class="daytag${d===0?" now":""}">${tag}</span>`; })()}${pretty(date)}</div>
     <div class="flow num">
       <div class="cell"><div class="lbl">${isStart?"Starting with":"Start of day"}</div><div>${startCell}</div></div>
       <div class="cell"><div class="lbl" style="color:var(--in)">Came in</div><div><div class="big" style="color:var(--in)" id="numIn">+${fmtPbare(m.inC)}</div>${m.inA>m.inC?`<div class="sub">of ${fmtPbare(m.inA)} expected</div>`:""}</div></div>
@@ -1375,7 +1383,7 @@ function renderMain(){
              <span class="gbar" aria-hidden="true"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>`;
       }
       const ins = insightsFor(s, t)[0];
-      return `<div class="pulse num">${sparkSVG(sparkData(s, t))}
+      return `<div class="pulse num">${sparkSVG(sparkData(s, t), t)}
         <div class="pstack">
           <span class="ptext${r.burning&&r.days<30?" low":""}">${rText}</span>
           ${goalLine}
@@ -1402,6 +1410,7 @@ function renderMain(){
     </div>
     ${body}
     ${sectionNavHTML()}
+    ${view==="day"?'<button class="fab" id="fab" aria-label="New entry"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button>':""}
     </div>
     <div class="foot">
       1 USD = ${s.rate.toFixed(4)} CAD
@@ -1419,6 +1428,9 @@ function renderMain(){
   lastAnimDate = date;
   const flip = document.getElementById("flipCur");
   if (flip) flip.onclick = ()=>{ s.settings.currencyDisplay = cadFirst() ? "usd" : "cad"; save(); render(); };
+  const fab = document.getElementById("fab");
+  if (fab) fab.onclick = ()=>{ const el = document.querySelector('[data-f="name"][data-k="out"]'); if (el) { el.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "center" }); el.focus({ preventScroll: true }); } };
+  lastAddedId = null;
   const pt = document.getElementById("pendTray");
   if (pt) pt.onclick = ()=>{ showPendTray = !showPendTray; render(); };
   document.querySelectorAll("[data-psettle]").forEach(b=>b.onclick=()=>{
@@ -1563,7 +1575,11 @@ function bindShared(){
   app.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
   app.querySelectorAll("[data-toggle]").forEach(c=>{
     c.indeterminate = c.hasAttribute("data-ind");
-    c.onchange=()=>{ toggleItem(s, c.dataset.toggle, todayISO()); save(); render(); };
+    c.onchange=()=>{
+      const row = c.closest(".row");
+      const go = ()=>{ toggleItem(s, c.dataset.toggle, todayISO()); save(); render(); };
+      if (row && !reduced()) { row.classList.add("checking"); setTimeout(go, 200); } else go();
+    };
   });
   app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -1607,6 +1623,13 @@ function bindShared(){
     const x = s.items.find(i=>i.id===b.dataset.lag);
     const target = lagSuggestion(s, x);
     if (target) { redateItem(s, x.id, target, todayISO()); save(); render(); }
+  });
+  app.querySelectorAll("[data-again]").forEach(b=>b.onclick=e=>{
+    e.preventDefault();
+    const x = s.items.find(i=>i.id===b.dataset.again);
+    const copy = { ...x, id: uid("x"), date: todayISO(), checked: false, settle: null, createdAt: todayISO(), importId: null, recurringSourceId: null, note: "", receiptUrl: "" };
+    s.items.push(copy); lastAddedId = copy.id;
+    expandedId = null; date = todayISO(); view = "day"; save(); render();
   });
   app.querySelectorAll("[data-yesterday]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -1661,7 +1684,7 @@ function bindMain(){
   const $ = id => document.getElementById(id);
   const app = $("app");
   bindShared();
-  const goto = d => { date=d; editCarry=false; showDone={in:false,out:false,proc:false}; save(); render(); };
+  const goto = gotoDate;
   const step = view==="month" ? n=>addMonths(date, n) : n=>shift(date, n);
   $("prev").onclick = ()=>goto(step(-1));
   $("next").onclick = ()=>goto(step(1));
@@ -1775,6 +1798,7 @@ function add(kind){
   const v = upsertVendorFromEntry(s, item);
   item.accountId = v.defaultAccountId;
   s.items.push(item);
+  lastAddedId = item.id;
   drafts[kind]={name:"",amount:"",cur:d.cur};
   save(); render();
   const el=document.querySelector(`[data-f="name"][data-k="${kind}"]`); if(el) el.focus();
@@ -1800,6 +1824,18 @@ if (typeof window === "undefined") {
   }
   refreshRate();
   setInterval(refreshRate, 6 * 60 * 60 * 1000);
+
+  // swipe left/right to move through days (or months on the month tab)
+  let sx = 0, sy = 0, st0 = 0;
+  document.addEventListener("touchstart", e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st0 = Date.now(); }, { passive: true });
+  document.addEventListener("touchend", e => {
+    const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = t.clientY - sy;
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
+    if (typing || Date.now() - st0 > 600 || Math.abs(dx) < 70 || Math.abs(dy) > 50) return;
+    if (!(view === "day" || view === "month" || view === "all")) return;
+    const n = dx < 0 ? 1 : -1;
+    gotoDate(view === "month" ? addMonths(date, n) : shift(date, n));
+  }, { passive: true });
 
   document.addEventListener("keydown", e => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
