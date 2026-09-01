@@ -18,7 +18,7 @@ const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(
 const shift = (iso, n) => { const [y,m,d] = iso.split("-").map(Number); const t = new Date(y, m-1, d+n); return `${t.getFullYear()}-${pad(t.getMonth()+1)}-${pad(t.getDate())}`; };
 const pretty = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d).toLocaleDateString("en-US", { weekday:"short", month:"short", day:"numeric", year:"numeric" }); };
 const prettyShort = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d).toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" }); };
-const fmt = (n, sym="US$") => (n<0?"−":"") + sym + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmt = (n, sym="US$") => { const v = Math.abs(n) < 0.005 ? 0 : n; return (v<0?"−":"") + sym + Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); };
 // Primary/secondary display currency. Amounts are stored in USD; this only changes what leads.
 const cadFirst = () => (typeof s !== "undefined" && s?.settings?.currencyDisplay) === "cad";
 const fmtP = usd => cadFirst() ? fmt(usd * s.rate, "C$") : fmt(usd);
@@ -111,6 +111,24 @@ function ensure(st){
   return st;
 }
 
+// Fold one vendor into another: entries, recurring links, processor flag move over.
+function mergeVendor(st, fromId, intoId){
+  if (fromId === intoId) return false;
+  const from = st.vendors.find(v => v.id === fromId), into = st.vendors.find(v => v.id === intoId);
+  if (!from || !into) return false;
+  st.items.forEach(x => {
+    if (x.vendorId === fromId) x.vendorId = intoId;
+    if (x.recurringSourceId === fromId) x.recurringSourceId = intoId;
+  });
+  if (from.isProcessor) into.isProcessor = true;
+  if (!into.cadence && from.cadence) { into.cadence = from.cadence; into.dayOfMonth = from.dayOfMonth; }
+  into.skipDates = [...new Set([...(into.skipDates || []), ...(from.skipDates || [])])];
+  if (!into.note && from.note) into.note = from.note;
+  if (!into.url && from.url) into.url = from.url;
+  st.vendors = st.vendors.filter(v => v.id !== fromId);
+  return true;
+}
+
 // Deleting a vendor keeps every entry; they just lose the link.
 function deleteVendor(st, id, today){
   const v = st.vendors.find(z => z.id === id);
@@ -141,8 +159,16 @@ function load(){
     const legacy = localStorage.getItem(LEGACY_KEY);
     if (legacy) return migrate(JSON.parse(legacy));
   } catch(e){ console.error(e); }
-  return ensure(structuredClone(SEED));
+  return freshState();
 }
+
+// A brand-new device starts empty: today, nothing owed, one welcome card.
+function freshState(){
+  const st = ensure(structuredClone(SEED));
+  st.items = []; st.startDate = todayISO(); st.startBudget = 0; st.settings.fresh = true;
+  return st;
+}
+const isFresh = () => !!(s.settings.fresh && !s.items.length && !s.startBudget);
 
 let s, date;
 let view = "day";
@@ -411,6 +437,23 @@ function goalInfo(st, g, today){
   return { cash, pct, reached, daysLeft, needPerDay, pace, behind: !reached && daysLeft > 0 && needPerDay > Math.max(pace, 0) };
 }
 
+// Walk the next N days through everything scheduled and unchecked; where does cash bottom out?
+function forecastLow(st, today, days = 30){
+  const nets = dailyNets(st);
+  let bal = calc(st, today).allTime;
+  let overdue = 0;
+  for (const [d, e] of nets) if (d >= st.startDate && d <= today) overdue += e.all - e.chk;
+  let min = bal, minDate = today;
+  for (let i = 1; i <= days; i++) {
+    const d = shift(today, i);
+    if (i === 1) bal += overdue;
+    const e = nets.get(d);
+    bal += (e ? e.all - e.chk : 0) + ((st.adjust || {})[d] || 0);
+    if (bal < min) { min = bal; minDate = d; }
+  }
+  return { min, date: minDate, endBalance: bal };
+}
+
 // The one most useful thing the numbers can say right now.
 function insightsFor(st, today){
   const out = [];
@@ -601,6 +644,8 @@ function statusChipsHTML(m){
   const pend = s.items.filter(x => x.settle === "pending");
   if (pend.length) chips.push(`<button class="chip${showPendTray?" on":""}" id="pendTray"><span class="dot"></span><b>${pend.length}</b> waiting to settle</button>`);
   if (m.pendingEarlier > 0 && view === "day") chips.push(`<button class="chip warn" data-view="all"><span class="dot"></span><b>${m.pendingEarlier}</b> unchecked from earlier days</button>`);
+  const fl = forecastLow(s, t); const cushion = s.settings.cushionUsd || 0;
+  if (view === "day" && fl.date !== t && fl.min < cushion) chips.push(`<button class="chip warn" data-open="${fl.date}"><span class="dot"></span>Dips to <b>${fmtP(fl.min)}</b> ${prettyShort(fl.date)}</button>`);
   const bb = s.settings.slashSync?.balance;
   if (bb) { const diff = bb.available - calc(s, t).end; if (Math.abs(diff) > 1) chips.push(`<button class="chip warn" data-nav="settings"><span class="dot"></span>Off from Slash by <b>${fmtP(diff)}</b></button>`); else chips.push(`<span class="chip good"><span class="dot"></span>Matches <b>Slash</b></span>`); }
   const g = s.goals.sort((a, b) => a.targetDate.localeCompare(b.targetDate))[0];
@@ -640,6 +685,8 @@ function dayBriefHTML(m){
     <div class="pulse-foot">
       ${ins ? `<span${ins.tone==="warn"?' style="color:var(--out)"':""}>${ins.text}</span>` : ""}
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
+      ${(()=>{ const f = forecastLow(s, t); const cushion = s.settings.cushionUsd || 0; const low = f.min < cushion;
+        return f.date === t ? "" : `<span${low?' style="color:var(--out)"':""}>Next 30 days bottom out at <b>${fmtP(f.min)}</b> on <button class="link" data-open="${f.date}" style="margin-left:0">${prettyShort(f.date)}</button>${low&&cushion?` — under your ${fmtP(cushion)} cushion`:""}</span>`; })()}
     </div>
   </section>`;
 }
@@ -1138,6 +1185,14 @@ function stackedRows(items, key, fold){
   return html;
 }
 
+// The last few merchants you logged by hand in this direction.
+function recentVendors(st, kind){
+  const seen = [];
+  const manual = st.items.filter(x => x.kind === kind && !x.importId && !x.recurringSourceId && !x.declined).sort((a, b) => b.date.localeCompare(a.date));
+  for (const x of manual) { const n = x.name.trim(); if (!seen.some(z => z.toLowerCase() === n.toLowerCase())) seen.push(n); if (seen.length >= 5) break; }
+  return seen;
+}
+
 function listHTML(kind, items){
   const isIn = kind==="in";
   const d = drafts[kind];
@@ -1154,6 +1209,7 @@ function listHTML(kind, items){
         <button class="btn" data-add="${kind}">Add</button>
       </div>
       <div class="cadnote" data-cadnote="${kind}"${d.cur==="CAD"&&a>0?"":" hidden"}>${d.cur==="CAD"&&a>0?`${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.`:""}</div>
+      ${(()=>{ const r = recentVendors(s, kind); return r.length ? `<div class="recent">${r.map(n=>`<button class="chip mini" data-quick="${kind}" data-name="${esc(n)}">${esc(n)}</button>`).join("")}</div>` : ""; })()}
     </div>
   </div>`;
 }
@@ -1461,6 +1517,9 @@ function renderSettings(){
       <div class="sub" style="margin-top:8px">For re-importing a month clean. Undo has your back for 6 seconds.</div>
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <label class="sub" style="margin:0;display:block;margin-bottom:10px">Warn when the 30-day low dips under
+        <input id="cushion" type="number" step="1" min="0" value="${s.settings.cushionUsd||0}" style="width:110px;margin:0 6px;padding:5px 8px;font-size:12.5px" aria-label="Cushion in US dollars"> US$
+      </label>
       <label class="sub" style="margin:0">Due-soon marks show
         <input id="warnDays" type="number" min="0" max="30" value="${s.settings.warnDaysAhead}" style="width:60px;margin:0 6px;padding:5px 8px;font-size:12.5px" aria-label="Days ahead for due marks">
       days ahead</label>
@@ -1555,6 +1614,7 @@ function renderSettings(){
   if (ap) ap.onclick = ()=>{ s = pendingImport; pendingImport = null; date = s.lastDate || todayISO(); save(); render(); };
   const ci = document.getElementById("cancelImport");
   if (ci) ci.onclick = ()=>{ pendingImport = null; render(); };
+  document.getElementById("cushion").onchange = e=>{ s.settings.cushionUsd = Math.max(0, parseFloat(e.target.value) || 0); save(); render(); };
   document.getElementById("warnDays").onchange = e=>{
     s.settings.warnDaysAhead = Math.min(30, Math.max(0, parseInt(e.target.value, 10) || 0));
     save(); render();
@@ -1768,6 +1828,11 @@ function renderMain(){
     </div>
     <div id="page" class="${slideCls}">
     ${sandboxBarHTML()}
+    ${isFresh() ? `<div class="welcome">
+      <div class="lt" style="font-size:17px">Start with what you have</div>
+      <div class="sub" style="margin:4px 0 12px">Type today's balance and the strip takes it from here. Or restore a backup, or connect Slash in Settings — either fills this in for you.</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="sub num" style="margin:0">US$</span><input id="welcomeAmt" type="number" step="0.01" placeholder="0.00" style="width:160px" aria-label="Today's balance in US dollars"><button class="btn" id="welcomeGo">Save</button></div>
+    </div>` : ""}
     <div class="dayhead">${(()=>{ const d = dayDiff(todayISO(), date);
       const tag = d===0?"Today":d===-1?"Yesterday":d===1?"Tomorrow":d<0?`${-d} days ago`:`In ${d} days`;
       return `<span class="daytag${d===0?" now":""}">${tag}</span>`; })()}${pretty(date)}</div>
@@ -1803,6 +1868,9 @@ function renderMain(){
   const fab = document.getElementById("fab");
   if (fab) fab.onclick = ()=>{ const el = document.querySelector('[data-f="name"][data-k="out"]'); if (el) { el.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "center" }); el.focus({ preventScroll: true }); } };
   lastAddedId = null;
+  const wg = document.getElementById("welcomeGo");
+  if (wg) { const go = ()=>{ const v = parseFloat(document.getElementById("welcomeAmt").value); if (isNaN(v)) return; s.startBudget = v; s.startDate = date; s.settings.fresh = false; save(); render(); toast("Set — check things off as they happen"); };
+    wg.onclick = go; document.getElementById("welcomeAmt").onkeydown = e=>{ if (e.key==="Enter") go(); }; }
   const sbOn = document.getElementById("sbOn");
   if (sbOn) sbOn.onclick = ()=>{ sandbox = structuredClone(s); render(); toast("Sandbox on — nothing is saved until you keep it"); };
   const sbKeep = document.getElementById("sbKeep");
@@ -1854,6 +1922,15 @@ function renderVendor(){
         Payment processor — its entries get their own section on the day
       </label>
     </div>
+    ${s.vendors.length > 1 ? `<div class="cadrow">
+      <span>Merge into</span>
+      <select id="vMerge" aria-label="Merge this vendor into another">
+        <option value="">choose a vendor…</option>
+        ${s.vendors.filter(z => z.id !== v.id).sort((a, b) => a.name.localeCompare(b.name)).map(z => `<option value="${z.id}">${esc(z.name)}</option>`).join("")}
+      </select>
+      <button class="btn btn2" id="vMergeGo" style="padding:6px 10px;font-size:12px">Merge</button>
+      <span class="sub" style="margin:0">Moves every entry over and removes this name. Undo has you.</span>
+    </div>` : ""}
     ${s.accounts.length?`<div class="cadrow num">
       <span>Account</span>
       <select id="vAccount" aria-label="Default account">
@@ -1881,6 +1958,12 @@ function renderVendor(){
     save(); render();
   };
   document.getElementById("vProc").onchange = e=>{ v.isProcessor = e.target.checked; save(); render(); };
+  const mg = document.getElementById("vMergeGo");
+  if (mg) mg.onclick = ()=>{
+    const into = document.getElementById("vMerge").value; if (!into) return;
+    armUndo(structuredClone(s));
+    if (mergeVendor(s, v.id, into)) { openVendorId = into; save(); render(); toast("Merged"); }
+  };
   const vAcc = document.getElementById("vAccount");
   if (vAcc) vAcc.onchange = e=>{
     v.defaultAccountId = e.target.value || null;
@@ -1941,9 +2024,10 @@ function cadNote(kind){
   const el = document.querySelector(`[data-cadnote="${kind}"]`);
   if (!el) return;
   const d = drafts[kind]; const a = parseFloat(d.amount)||0;
-  const show = d.cur==="CAD" && a>0;
-  el.hidden = !show;
-  el.textContent = show ? `${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.` : "";
+  if (d.cur==="CAD" && a>0) { el.hidden = false; el.textContent = `${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.`; return; }
+  const q = !a ? parseQuickAdd(d.name) : null;
+  if (q) { el.hidden = false; el.textContent = `Adds ${q.name} · ${q.cur==="CAD"?fmt(q.amount,"C$"):fmt(q.amount)}${q.kind?(q.kind==="in"?" · money in":" · money out"):""}${q.pending?" · authorized, not settled":""}`; return; }
+  el.hidden = true; el.textContent = "";
 }
 
 // handlers shared by any view that renders entry rows
@@ -2075,6 +2159,7 @@ function bindMain(){
       drafts[k][f]=el.value;
       if(f==="cur"||f==="amount") cadNote(k);
       if(f==="name"){
+        cadNote(k);
         // suggest only after typing, and only what matches
         const q = el.value.trim().toLowerCase();
         const dl = document.getElementById("vendorNames");
@@ -2102,6 +2187,14 @@ function bindMain(){
     el.onkeydown = e=>{ if(e.key==="Enter") add(k); };
   });
   app.querySelectorAll("[data-add]").forEach(b=>b.onclick=()=>add(b.dataset.add));
+  app.querySelectorAll("[data-quick]").forEach(b=>b.onclick=()=>{
+    const k = b.dataset.quick, n = b.dataset.name;
+    drafts[k].name = n;
+    const v = findVendorByName(s, n);
+    if (v) { const d0 = vendorDefaults(v); if (d0.amount > 0) { drafts[k].amount = String(d0.amount); drafts[k].cur = d0.cur; } }
+    render();
+    const amt = app.querySelector(`[data-f="amount"][data-k="${k}"]`); if (amt) { amt.focus(); amt.select && amt.select(); }
+  });
   if ($("editStart")) $("editStart").onclick = ()=>{ editStart=true; render(); $("startDraft").focus(); };
   if ($("editCarry")) $("editCarry").onclick = ()=>{ editCarry=true; render(); $("carryDraft").focus(); };
   if ($("saveCarry")) { const doSave=()=>{
@@ -2173,17 +2266,29 @@ function bindMain(){
   const lg = document.getElementById("lgroup"); if (lg) lg.onclick = ()=>{ ledgerGroup = !ledgerGroup; render(); };
 }
 
+// "uber 42", "chapa 2500 cad", "kurv +2000 pending" -> name, amount, currency, direction, state
+function parseQuickAdd(text){
+  const m = String(text || "").trim().match(/^(.*?)\s+([+\-−])?\s*(?:us\$|c\$|\$)?(\d[\d,]*(?:\.\d+)?)\s*(usd|cad|us\$|c\$)?\s*(pending|authorized|auth|held)?\s*$/i);
+  if (!m || !m[1].trim()) return null;
+  const amount = parseFloat(m[3].replace(/,/g, ""));
+  if (!(amount > 0)) return null;
+  const curRaw = (m[4] || "").toLowerCase();
+  return { name: m[1].trim(), amount, cur: curRaw.startsWith("c") ? "CAD" : curRaw ? "USD" : null,
+           kind: m[2] === "+" ? "in" : (m[2] ? "out" : null), pending: !!m[5] };
+}
+
 function add(kind){
-  const d=drafts[kind]; const a=parseFloat(d.amount)||0;
-  if(!d.name.trim()||!a) return;
-  const item = { id:uid("x"), kind, date, name:d.name.trim(), usd: d.cur==="CAD"?a/s.rate:a, cadFixed: d.cur==="CAD"?a:null, checked:false, accountId:null, vendorId:null, note:"", receiptUrl:"", recurringSourceId:null, settle:null, createdAt: date };
+  const d=drafts[kind]; let a=parseFloat(d.amount)||0; let name=d.name.trim(); let cur=d.cur; let k=kind; let pending=false;
+  if (!a) { const q = parseQuickAdd(name); if (q) { name=q.name; a=q.amount; if (q.cur) cur=q.cur; if (q.kind) k=q.kind; pending=q.pending; } }
+  if(!name||!a) return;
+  const item = { id:uid("x"), kind:k, date, name, usd: cur==="CAD"?a/s.rate:a, cadFixed: cur==="CAD"?a:null, checked: pending ? k==="out" : false, accountId:null, vendorId:null, note:"", receiptUrl:"", recurringSourceId:null, settle: pending ? "pending" : null, createdAt: date };
   const v = upsertVendorFromEntry(s, item);
   item.accountId = v.defaultAccountId;
   s.items.push(item);
   lastAddedId = item.id;
   drafts[kind]={name:"",amount:"",cur:d.cur};
   save(); render();
-  const el=document.querySelector(`[data-f="name"][data-k="${kind}"]`); if(el) el.focus();
+  const el=document.querySelector(`[data-f="name"][data-k="${k}"]`); if(el) el.focus();
 }
 
 function exportCsv(){
@@ -2194,7 +2299,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState };
 } else {
   s = load();
   date = s.lastDate || todayISO();

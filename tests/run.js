@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState, fmt } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -565,6 +565,43 @@ const round2 = n => Math.round(n * 100) / 100;
   const c = ledgerCompress(rows);
   assert("consecutive same-merchant rows compress into one line with a total", c.length === 3 && c[0].n === 3 && Math.round(c[0].total*100)/100 === 3.2 && c[0].bal === 100);
   assert("a different state (unchecked) starts a new line", c[2].n === 1 && c[2].x.id === "f4");
+}
+
+// 29. Perfection pass: quick-add parsing, 30-day low, vendor merge, recents, fresh start, negative zero
+{
+  assert("no negative zero", fmt(-0.001) === "US$0.00" && fmt(-0.01) === "−US$0.01");
+  const q1 = parseQuickAdd("uber 42");
+  assert("quick-add: name and amount", q1 && q1.name === "uber" && q1.amount === 42 && q1.cur === null && q1.kind === null && !q1.pending);
+  const q2 = parseQuickAdd("Chapa's Rent 2,500 cad");
+  assert("quick-add: currency", q2 && q2.name === "Chapa's Rent" && q2.amount === 2500 && q2.cur === "CAD");
+  const q3 = parseQuickAdd("kurv +2000 pending");
+  assert("quick-add: direction and pending", q3 && q3.kind === "in" && q3.pending === true && q3.amount === 2000);
+  assert("quick-add: plain names are left alone", parseQuickAdd("Meta ads") === null && parseQuickAdd("42") === null);
+
+  const st = structuredClone(SEED);
+  st.items[1].checked = true; // cash 6858.01
+  st.items.push({ id: "f1", kind: "out", date: "2026-09-10", name: "Regus", usd: 5000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push({ id: "f2", kind: "in", date: "2026-09-15", name: "Kurv", usd: 3000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const f = forecastLow(st, "2026-09-01");
+  // day 1 absorbs the overdue Chapa rent (-1799.86), Sep 10 the Regus bill, Sep 15 the payout
+  assert("30-day low finds the dip and its day", f.date === "2026-09-10" && Math.round(f.min*100)/100 === Math.round((6858.01 - 2500/1.389 - 5000)*100)/100);
+  assert("forecast ends after the payout lands", Math.round(f.endBalance*100)/100 === Math.round((6858.01 - 2500/1.389 - 5000 + 3000)*100)/100);
+
+  const st2 = structuredClone(SEED); st2.vendors = [];
+  const u1 = upsertVendorFromEntry(st2, { id: "m1", kind: "out", date: "2026-08-31", name: "UBER CANADA/UBEREATS", usd: 52, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const u2 = upsertVendorFromEntry(st2, { id: "m2", kind: "out", date: "2026-08-30", name: "Uber Eats", usd: 37, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st2.items.push({ id: "m1", kind: "out", date: "2026-08-31", name: "UBER CANADA/UBEREATS", usd: 52, cadFixed: null, checked: true, accountId: null, vendorId: u1.id, note: "", receiptUrl: "", recurringSourceId: null });
+  u1.isProcessor = true;
+  assert("merge moves entries and removes the old name", mergeVendor(st2, u1.id, u2.id) === true && st2.vendors.length === 1 && st2.items.find(x => x.id === "m1").vendorId === u2.id && u2.isProcessor === true);
+  assert("merge refuses nonsense", mergeVendor(st2, u2.id, u2.id) === false && mergeVendor(st2, "nope", u2.id) === false);
+
+  const st3 = structuredClone(SEED);
+  st3.items.push({ id: "r1", kind: "out", date: "2026-09-01", name: "Uber", usd: 5, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st3.items.push({ id: "r2", kind: "out", date: "2026-09-01", name: "Imported", usd: 5, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, importId: "tx" });
+  assert("recents are hand-logged names only, newest first", recentVendors(st3, "out").join(",") === "Uber,Chapa - rent,Chargeblast (5 bills)");
+
+  const fresh = freshState();
+  assert("a new device starts empty with today as the start", fresh.items.length === 0 && fresh.startBudget === 0 && fresh.settings.fresh === true && /^\d{4}-\d{2}-\d{2}$/.test(fresh.startDate));
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

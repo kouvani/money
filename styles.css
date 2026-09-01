@@ -330,3 +330,6 @@ input[type=checkbox]:active{transform:scale(.8)}
 .lagchip,.tinytag{transition:transform .2s var(--spring)}
 .lagchip:hover{transform:translateY(-1px)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}.tabind{transition:none!important}}
+.recent{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.chip.mini{padding:5px 10px;font-size:12px;box-shadow:none;background:var(--surface)}
+.welcome{margin:0 0 16px;padding:16px 20px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);animation:fadeUp .45s var(--ease)}
