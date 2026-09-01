@@ -99,7 +99,7 @@ function listHTML(kind, items){
         <select data-f="cur" data-k="${kind}" aria-label="Currency" style="padding:9px 6px"><option ${d.cur==="USD"?"selected":""}>USD</option><option ${d.cur==="CAD"?"selected":""}>CAD</option></select>
         <button class="btn" data-add="${kind}">Add</button>
       </div>
-      ${d.cur==="CAD"&&a>0?`<div class="cadnote">${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.</div>`:""}
+      <div class="cadnote" data-cadnote="${kind}"${d.cur==="CAD"&&a>0?"":" hidden"}>${d.cur==="CAD"&&a>0?`${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.`:""}</div>
     </div>
   </div>`;
 }
@@ -158,6 +158,15 @@ function render(){
   bind();
 }
 
+function cadNote(kind){
+  const el = document.querySelector(`[data-cadnote="${kind}"]`);
+  if (!el) return;
+  const d = drafts[kind]; const a = parseFloat(d.amount)||0;
+  const show = d.cur==="CAD" && a>0;
+  el.hidden = !show;
+  el.textContent = show ? `${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.` : "";
+}
+
 function bind(){
   const $ = id => document.getElementById(id);
   const app = $("app");
@@ -171,7 +180,7 @@ function bind(){
   app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{ e.preventDefault(); s.items=s.items.filter(i=>i.id!==b.dataset.remove); save(); render(); });
   app.querySelectorAll("[data-f]").forEach(el=>{
     const k=el.dataset.k, f=el.dataset.f;
-    el.oninput = ()=>{ drafts[k][f]=el.value; if(f==="cur"||f==="amount"){ const focus=document.activeElement; const pos=focus.selectionStart; render(); const again=app.querySelector(`[data-f="${f}"][data-k="${k}"]`); if(again){ again.focus(); if(f==="amount"&&pos!=null) try{again.setSelectionRange(pos,pos);}catch{} } } };
+    el.oninput = ()=>{ drafts[k][f]=el.value; if(f==="cur"||f==="amount") cadNote(k); };
     el.onkeydown = e=>{ if(e.key==="Enter") add(k); };
   });
   app.querySelectorAll("[data-add]").forEach(b=>b.onclick=()=>add(b.dataset.add));
