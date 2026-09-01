@@ -57,7 +57,18 @@ function ensure(st){
     x.cadFixed = x.cadFixed ?? null; x.accountId = x.accountId ?? null; x.vendorId = x.vendorId ?? null;
     x.note = x.note ?? ""; x.receiptUrl = x.receiptUrl ?? ""; x.recurringSourceId = x.recurringSourceId ?? null;
   });
+  const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
+  st.accounts.forEach((a, i) => {
+    a.kind = a.kind === "personal" ? "personal" : "business";
+    a.color = a.color ?? palette[i % palette.length];
+    a.start = typeof a.start === "number" ? a.start : 0;
+  });
   return st;
+}
+
+function accountBalance(st, a){
+  return a.start + st.items.filter(x => x.checked && x.accountId === a.id)
+    .reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
 }
 
 function load(){
@@ -74,6 +85,9 @@ let s, date;
 let view = "day";
 let openVendorId = null;
 let deleteAsk = null;
+let expandedId = null;
+let accountsFilter = "all";
+let editAccId = null;
 let editStart = false;
 let showRate = false;
 const drafts = { in:{name:"",amount:"",cur:"USD"}, out:{name:"",amount:"",cur:"USD"} };
@@ -226,12 +240,20 @@ function rowHTML(x){
   const color = x.kind==="in" ? "var(--in)" : "var(--out)";
   const sign = x.kind==="in" ? "+" : "−";
   const cad = x.cadFixed!=null ? x.cadFixed : x.usd*s.rate;
+  const detail = expandedId === x.id ? `<div class="detail">
+    <label class="sub" style="margin:0">Account
+      <select data-acc="${x.id}" aria-label="Account for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
+        <option value="">none</option>
+        ${s.accounts.map(a=>`<option value="${a.id}" ${x.accountId===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
+      </select>
+    </label>
+  </div>` : "";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
     <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}</div>
-    <div class="amt num"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
+    <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
-  </label>`;
+  </label>${detail}`;
 }
 
 function listHTML(kind, items){
@@ -266,7 +288,71 @@ function render(){
   if (generateRecurring(s, todayISO(), shift(date, 32)) > 0) save();
   if (view === "vendor") return renderVendor();
   if (view === "vendors") return renderVendors();
+  if (view === "accounts") return renderAccounts();
   renderMain();
+}
+
+function renderAccounts(){
+  const shown = s.accounts.filter(a => accountsFilter === "all" || a.kind === accountsFilter);
+  const total = shown.reduce((t, a) => t + accountBalance(s, a), 0);
+  const unassigned = s.items.filter(x => x.checked && !x.accountId)
+    .reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+  document.getElementById("app").innerHTML = `
+    <div class="datebar">
+      <button class="link" id="back" style="margin-left:0">‹ back</button>
+      <div class="tabs">
+        <button class="tab ${accountsFilter==="all"?"on":""}" data-afilter="all">All</button>
+        <button class="tab ${accountsFilter==="business"?"on":""}" data-afilter="business">Business</button>
+        <button class="tab ${accountsFilter==="personal"?"on":""}" data-afilter="personal">Personal</button>
+      </div>
+    </div>
+    <div class="lt" style="font-size:20px;margin-bottom:14px">Accounts</div>
+    ${shown.length?shown.map(a=>{
+      const bal = accountBalance(s, a);
+      const balCell = editAccId===a.id
+        ? `<span style="display:flex;gap:6px;align-items:center"><input id="accDraft" type="number" step="0.01" value="${round2(bal).toFixed(2)}" style="width:130px;padding:5px 8px;text-align:right" aria-label="Balance for ${esc(a.name)}"><button class="btn" data-accsave="${a.id}" style="padding:6px 10px;font-size:12px">Save</button></span>`
+        : `<button class="bare num" data-accedit="${a.id}" style="font-size:15px;font-weight:600;color:${bal<0?"var(--out)":"var(--ink)"}">${fmt(bal)}<span class="tinylink">edit</span></button>`;
+      return `<div class="row" style="cursor:default">
+        <div class="sw" style="background:${a.color}"></div>
+        <div class="name">${esc(a.name)}<span class="tinytag">${a.kind}</span></div>
+        <div class="amt">${balCell}</div>
+      </div>`;
+    }).join(""):'<div class="empty">No accounts yet.</div>'}
+    <div class="summary num" style="margin-top:14px">
+      <span>${accountsFilter==="all"?"Across all accounts":accountsFilter==="business"?"Business total":"Personal total"}: <b>${fmt(total)}</b></span>
+      ${Math.abs(unassigned)>0.004?`<span>${fmt(unassigned)} of checked entries has no account</span>`:""}
+    </div>
+    <div class="addrow" style="margin-top:26px">
+      <div class="addgrid" style="grid-template-columns:1fr 130px auto">
+        <input id="accName" placeholder="Mercury" aria-label="Account name">
+        <select id="accKind" aria-label="Account type"><option value="business">business</option><option value="personal">personal</option></select>
+        <button class="btn" id="accAdd">Add</button>
+      </div>
+    </div>`;
+  document.getElementById("back").onclick = ()=>{ view="day"; render(); };
+  document.querySelectorAll("[data-afilter]").forEach(b=>b.onclick=()=>{ accountsFilter=b.dataset.afilter; render(); });
+  document.querySelectorAll("[data-accedit]").forEach(b=>b.onclick=()=>{ editAccId=b.dataset.accedit; render(); document.getElementById("accDraft").focus(); });
+  document.querySelectorAll("[data-accsave]").forEach(b=>{
+    const doSave = ()=>{
+      const a = s.accounts.find(z=>z.id===b.dataset.accsave);
+      const v = parseFloat(document.getElementById("accDraft").value);
+      // the balance is derived, so editing it adjusts the account's starting figure
+      if (!isNaN(v)) a.start = v - (accountBalance(s, a) - a.start);
+      editAccId = null; save(); render();
+    };
+    b.onclick = doSave;
+    document.getElementById("accDraft").onkeydown = e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editAccId=null; render(); } };
+  });
+  const accAdd = document.getElementById("accAdd");
+  const doAdd = ()=>{
+    const name = document.getElementById("accName").value.trim();
+    if (!name) return;
+    const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
+    s.accounts.push({ id: uid("a"), name, kind: document.getElementById("accKind").value, color: palette[s.accounts.length % palette.length], start: 0 });
+    save(); render();
+  };
+  accAdd.onclick = doAdd;
+  document.getElementById("accName").onkeydown = e=>{ if(e.key==="Enter") doAdd(); };
 }
 
 function datalistHTML(){
@@ -322,6 +408,7 @@ function renderMain(){
       1 USD = ${s.rate.toFixed(4)} CAD<button class="link" id="rateToggle">change</button>
       ${showRate?`<input id="rateInput" type="number" step="0.0001" value="${s.rate}" style="width:110px;margin-left:10px;display:inline-block;padding:5px 8px" aria-label="USD to CAD rate">`:""}
       <span style="margin-left:18px">Started ${pretty(s.startDate)} with ${fmt(s.startBudget)}</span>
+      <button class="link" id="accountsLink">accounts</button>
       <button class="link" id="vendorsLink">vendors</button>
       <button class="link" id="export">export CSV</button>
     </div>`;
@@ -360,6 +447,13 @@ function renderVendor(){
       ${v.cadence==="monthly"?`<span>on day</span><input id="vDay" type="number" min="1" max="31" value="${v.dayOfMonth??""}" aria-label="Day of month" style="width:64px">`:""}
       ${v.cadence?`<span class="sub" style="margin:0">Bills appear unchecked on their day. Delete one to skip it.</span>`:""}
     </div>
+    ${s.accounts.length?`<div class="cadrow num">
+      <span>Account</span>
+      <select id="vAccount" aria-label="Default account">
+        <option value="">none</option>
+        ${s.accounts.map(a=>`<option value="${a.id}" ${v.defaultAccountId===a.id?"selected":""}>${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>`:""}
     ${v.url?`<div class="sub" style="margin-bottom:10px"><a href="${esc(v.url)}" target="_blank" rel="noopener" class="quietlink">open link</a></div>`:""}
     <div style="margin-top:26px">${list.length?groupedItemsHTML(list):'<div class="empty">Nothing logged yet.</div>'}</div>`;
   bindShared();
@@ -376,6 +470,13 @@ function renderVendor(){
         v.dayOfMonth = Number((mine[0]?.date || todayISO()).slice(8, 10));
       }
     }
+    save(); render();
+  };
+  const vAcc = document.getElementById("vAccount");
+  if (vAcc) vAcc.onchange = e=>{
+    v.defaultAccountId = e.target.value || null;
+    // future expectations follow the vendor's account
+    s.items.forEach(x=>{ if (x.recurringSourceId === v.id && !x.checked && x.date >= todayISO()) x.accountId = v.defaultAccountId; });
     save(); render();
   };
   const vDay = document.getElementById("vDay");
@@ -441,6 +542,18 @@ function bindShared(){
     deleteAsk = null; save(); render();
   });
   app.querySelectorAll("[data-del-cancel]").forEach(b=>b.onclick=()=>{ deleteAsk = null; render(); });
+  app.querySelectorAll("[data-expand]").forEach(el=>el.onclick=e=>{
+    e.preventDefault();
+    expandedId = expandedId === el.dataset.expand ? null : el.dataset.expand;
+    render();
+  });
+  app.querySelectorAll("[data-acc]").forEach(sel=>{
+    sel.onchange = ()=>{
+      const x = s.items.find(i=>i.id===sel.dataset.acc);
+      x.accountId = sel.value || null;
+      save(); render();
+    };
+  });
   app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ date=b.dataset.open; view="day"; save(); render(); });
   app.querySelectorAll("[data-vopen-item]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -491,6 +604,7 @@ function bindMain(){
     $("saveStart").onclick=doSave; $("startDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editStart=false; render(); } }; }
   $("rateToggle").onclick = ()=>{ showRate=!showRate; render(); };
   if ($("rateInput")) $("rateInput").oninput = e=>{ s.rate=parseFloat(e.target.value)||1; save(); const keep=e.target; const v=keep.value; render(); const again=$("rateInput"); if(again){ again.value=v; again.focus(); } };
+  $("accountsLink").onclick = ()=>{ view="accounts"; render(); };
   $("vendorsLink").onclick = ()=>{ view="vendors"; render(); };
   $("export").onclick = exportCsv;
 }
@@ -515,7 +629,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance };
 } else {
   s = load();
   date = s.lastDate || todayISO();

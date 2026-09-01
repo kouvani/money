@@ -1,4 +1,4 @@
-const CACHE = "money-v6.0.4";
+const CACHE = "money-v6.0.5";
 const SHELL = [
   "./",
   "./index.html",

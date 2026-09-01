@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -113,6 +113,23 @@ const round2 = n => Math.round(n * 100) / 100;
   generateRecurring(st, "2026-09-01", null);
   const land = st.items.filter(x => x.recurringSourceId === v31.id).map(x => x.date).sort();
   assert("day 31 clamps to shorter months", land.includes("2026-09-30") && land.includes("2026-10-31") && land.includes("2026-11-30"));
+}
+
+// 7. Accounts: balance = starting figure plus checked entries; the strip is untouched
+{
+  const st = structuredClone(SEED);
+  st.accounts = [{ id: "am", name: "Mercury", kind: "business", color: "#1C6B5E", start: 4000 }];
+  st.items = [
+    { id: "p1", kind: "in", date: "2026-08-30", name: "Shopify payout", usd: 1200, cadFixed: null, checked: true, accountId: "am", vendorId: null, note: "", receiptUrl: "", recurringSourceId: null },
+    { id: "p2", kind: "out", date: "2026-08-31", name: "Meta ads", usd: 300, cadFixed: null, checked: true, accountId: "am", vendorId: null, note: "", receiptUrl: "", recurringSourceId: null },
+    { id: "p3", kind: "out", date: "2026-08-31", name: "Meta ads", usd: 999, cadFixed: null, checked: false, accountId: "am", vendorId: null, note: "", receiptUrl: "", recurringSourceId: null },
+    { id: "p4", kind: "out", date: "2026-08-31", name: "Groceries", usd: 50, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null },
+  ];
+  const a = st.accounts[0];
+  assert("account balance derives from start + checked entries only", accountBalance(st, a) === 4000 + 1200 - 300);
+  assert("entries without an account don't touch it", accountBalance(st, a) === 4900);
+  const legacyAccount = ensure({ version: 6, accounts: [{ id: "x", name: "Wise" }], vendors: [], items: [], settings: {} }).accounts[0];
+  assert("older account records gain kind/color/start", legacyAccount.kind === "business" && typeof legacyAccount.start === "number" && !!legacyAccount.color);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
