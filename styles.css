@@ -24,6 +24,8 @@ body{padding:16px 20px 64px}
 input,select,button{font-family:inherit;font-size:14px;color:var(--ink)}
 input,select{width:100%;padding:10px 12px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-s);font-variant-numeric:tabular-nums;transition:border-color .15s ease,box-shadow .15s ease,background .25s ease}
 input:focus,select:focus{outline:none;border-color:var(--muted);box-shadow:var(--ring)}
+input[type=number]{-moz-appearance:textfield;appearance:textfield}
+input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 input[type=date]{width:auto;padding:8px 12px;font-size:15px;font-weight:600}
 input[type=checkbox]{width:19px;height:19px;margin:0;flex-shrink:0;cursor:pointer;transition:transform .12s ease}
 input[type=checkbox]:active{transform:scale(.85)}
