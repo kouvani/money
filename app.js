@@ -223,6 +223,56 @@ function vendorStats(st, v, today){
   };
 }
 
+// ---- month ----
+
+function monthData(st, ym, today){
+  const [y, m] = ym.split("-").map(Number);
+  const days = [];
+  let inC = 0, outC = 0;
+  for (let d = 1; d <= daysInMonth(y, m); d++) {
+    const iso = `${y}-${pad(m)}-${pad(d)}`;
+    const todays = st.items.filter(x => x.date === iso);
+    inC += todays.filter(x => x.kind === "in" && x.checked).reduce((t, x) => t + x.usd, 0);
+    outC += todays.filter(x => x.kind === "out" && x.checked).reduce((t, x) => t + x.usd, 0);
+    days.push({
+      date: iso, day: d,
+      hasIn: todays.some(x => x.kind === "in"),
+      hasOut: todays.some(x => x.kind === "out"),
+      end: calc(st, iso).end,
+      warn: iso < today && todays.some(x => !x.checked),
+    });
+  }
+  return { days, inC, outC, net: inC - outC, offset: new Date(y, m - 1, 1).getDay() };
+}
+
+const fmtWhole = n => (n < 0 ? "−" : "") + Math.abs(Math.round(n)).toLocaleString("en-US");
+
+function monthHTML(){
+  const ym = date.slice(0, 7);
+  const [y, m] = ym.split("-").map(Number);
+  const md = monthData(s, ym, todayISO());
+  const title = new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const t = todayISO();
+  return `<div style="margin-top:36px">
+    <div class="lh"><div class="lt">${title}</div></div>
+    <div class="summary num" style="margin-top:6px;margin-bottom:14px">
+      <span>In: <b style="color:var(--in)">+${fmt(md.inC, "")}</b></span>
+      <span>Out: <b style="color:var(--out)">−${fmt(md.outC, "")}</b></span>
+      <span>Net: <b style="color:${md.net < 0 ? "var(--out)" : "var(--ink)"}">${fmt(md.net)}</b></span>
+    </div>
+    <div class="mgrid num">
+      ${["S","M","T","W","T","F","S"].map(w => `<div class="mwd">${w}</div>`).join("")}
+      ${Array.from({ length: md.offset }, () => `<div class="mday off" aria-hidden="true"></div>`).join("")}
+      ${md.days.map(d => `
+        <button class="mday${d.date === t ? " today" : ""}${d.warn ? " warn" : ""}" data-open="${d.date}" aria-label="${pretty(d.date)}${d.warn ? ", has unchecked entries" : ""}">
+          <span class="d">${d.day}</span>
+          <span class="mdots">${d.hasIn ? '<span class="mdot" style="background:var(--in)"></span>' : ""}${d.hasOut ? '<span class="mdot" style="background:var(--out)"></span>' : ""}</span>
+          <span class="mend">${fmtWhole(d.end)}</span>
+        </button>`).join("")}
+    </div>
+  </div>`;
+}
+
 // ---- rows ----
 
 const RMARK = `<svg class="rmark" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Repeats"><path d="M10.2 6A4.2 4.2 0 1 1 8.9 2.9"/><path d="M9.2 0.9l0.4 2.2-2.2 0.4"/></svg>`;
@@ -377,6 +427,8 @@ function renderMain(){
   let body;
   if (view==="day") {
     body = `<div class="cols">${listHTML("in", m.inT)}${listHTML("out", m.outT)}</div>`;
+  } else if (view==="month") {
+    body = monthHTML();
   } else {
     body = `<div style="margin-top:36px">${m.dates.length?"":'<div style="color:var(--muted)">Nothing logged on any day yet.</div>'}
       ${groupedItemsHTML(s.items)}</div>`;
@@ -385,11 +437,11 @@ function renderMain(){
   document.getElementById("app").innerHTML = `
     ${datalistHTML()}
     <div class="datebar">
-      <button class="nav" id="prev" aria-label="Previous day">‹</button>
+      <button class="nav" id="prev" aria-label="${view==="month"?"Previous month":"Previous day"}">‹</button>
       <input type="date" id="datePick" value="${date}" aria-label="Pick a date">
-      <button class="nav" id="next" aria-label="Next day">›</button>
+      <button class="nav" id="next" aria-label="${view==="month"?"Next month":"Next day"}">›</button>
       ${isToday?"":'<button class="link" id="today">today</button>'}
-      <div class="tabs"><button class="tab ${view==="day"?"on":""}" data-view="day">This day</button><button class="tab ${view==="all"?"on":""}" data-view="all">All days</button></div>
+      <div class="tabs"><button class="tab ${view==="day"?"on":""}" data-view="day">This day</button><button class="tab ${view==="month"?"on":""}" data-view="month">Month</button><button class="tab ${view==="all"?"on":""}" data-view="all">All days</button></div>
     </div>
     <div class="dayhead">${pretty(date)}</div>
     <div class="flow num">
@@ -571,8 +623,9 @@ function bindMain(){
   const $ = id => document.getElementById(id);
   const app = $("app");
   bindShared();
-  $("prev").onclick = ()=>{ date=shift(date,-1); save(); render(); };
-  $("next").onclick = ()=>{ date=shift(date,1); save(); render(); };
+  const step = view==="month" ? n=>addMonths(date, n) : n=>shift(date, n);
+  $("prev").onclick = ()=>{ date=step(-1); save(); render(); };
+  $("next").onclick = ()=>{ date=step(1); save(); render(); };
   $("datePick").onchange = e=>{ if(e.target.value){ date=e.target.value; save(); render(); } };
   if ($("today")) $("today").onclick = ()=>{ date=todayISO(); save(); render(); };
   app.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{ view=b.dataset.view; render(); });
@@ -629,7 +682,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData };
 } else {
   s = load();
   date = s.lastDate || todayISO();

@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -130,6 +130,21 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("entries without an account don't touch it", accountBalance(st, a) === 4900);
   const legacyAccount = ensure({ version: 6, accounts: [{ id: "x", name: "Wise" }], vendors: [], items: [], settings: {} }).accounts[0];
   assert("older account records gain kind/color/start", legacyAccount.kind === "business" && typeof legacyAccount.start === "number" && !!legacyAccount.color);
+}
+
+// 8. Month view data: totals, dots, end-of-day figures, past-unchecked marks
+{
+  const st = structuredClone(SEED);
+  st.items[1].checked = true; // Chargeblast paid, Chapa still unchecked
+  st.items.push({ id: "m1", kind: "in", date: "2026-08-15", name: "Shopify payout", usd: 2000, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const md = monthData(st, "2026-08", "2026-09-01");
+  assert("month totals sum checked entries", md.inC === 2000 && md.outC === 1545 && md.net === 455);
+  const d15 = md.days.find(d => d.date === "2026-08-15");
+  const d31 = md.days.find(d => d.date === "2026-08-31");
+  assert("dots reflect in/out entries", d15.hasIn && !d15.hasOut && d31.hasOut);
+  assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 10403.01 && Math.round(d31.end*100)/100 === 8858.01);
+  assert("past days with unchecked entries are marked", d31.warn === true && d15.warn === false);
+  assert("august 2026 starts on a saturday", md.offset === 6 && md.days.length === 31);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
