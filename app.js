@@ -170,7 +170,7 @@ let editStart = false;
 let showRate = false;
 const drafts = { in:{name:"",amount:"",cur:"USD"}, out:{name:"",amount:"",cur:"USD"} };
 
-function save(){ s.lastDate = date; try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){ console.error(e); } }
+function save(){ s.lastDate = date; if (sandbox) return; try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){ console.error(e); } }
 
 function calc(st, day){
   const sgn = x => x.kind==="in" ? x.usd : -x.usd;
@@ -582,9 +582,16 @@ function weekBarsSVG(sm){
 }
 
 // One row of quiet, tappable status chips under the strip.
+function sandboxBarHTML(){
+  return sandbox
+    ? `<div class="sandbar num"><span><b>Sandbox</b> — play with anything; nothing is saved until you keep it.</span><span><button class="btn" id="sbKeep" style="padding:7px 12px;font-size:12px">Keep changes</button><button class="link" id="sbDiscard">discard</button></span></div>`
+    : "";
+}
+
 function statusChipsHTML(m){
   const t = todayISO();
   const chips = [];
+  if (!sandbox && view === "day") chips.push(`<button class="chip" id="sbOn" title="Try what-ifs without saving"><span class="dot"></span>What if</button>`);
   const r = runwayInfo(s, t);
   chips.push(r.burning
     ? `<span class="chip${r.days < 30 ? " warn" : ""}"><span class="dot"></span>Cash lasts <b>${r.days} ${r.days===1?"day":"days"}</b></span>`
@@ -915,12 +922,12 @@ function recsFromSlashApi(items){
 
 // Pull new transactions through the relay and apply them quietly.
 let syncing = false;
-async function syncSlash(manual){
+async function syncSlash(manual, full){
   const c = s.settings.slashSync || {};
-  if (!c.url || !c.token || syncing || !navigator.onLine) return;
+  if (!c.url || !c.token || syncing || !navigator.onLine || sandbox) return;
   syncing = true;
   try {
-    const since = c.lastSyncMs ? c.lastSyncMs - 4 * 86400000 : Date.now() - 45 * 86400000;
+    const since = full ? 0 : (c.lastSyncMs ? c.lastSyncMs - 4 * 86400000 : Date.now() - 45 * 86400000);
     const r = await fetch(`${c.url.replace(/\/+$/, "")}/transactions?since=${since}`, { headers: { Authorization: `Bearer ${c.token}` } });
     if (!r.ok) throw new Error("relay " + r.status);
     const j = await r.json();
@@ -1078,6 +1085,7 @@ function groupedItemsHTML(list){
 
 let lastRenderedView = null;
 let showPendTray = false;
+let sandbox = null; // snapshot of the real state while you play with what-ifs
 let lastAddedId = null;
 function gotoDate(d){ date=d; editCarry=false; showDone={in:false,out:false,proc:false}; showPendTray=false; save(); render(); }
 
@@ -1246,6 +1254,10 @@ function renderSettings(){
         <input id="ssTok" type="password" value="${esc(s.settings.slashSync?.token||"")}" placeholder="App token" aria-label="Relay app token" autocomplete="off">
         <button class="btn btn2" id="ssSync">Sync now</button>
       </div>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <button class="link" id="ssFull" style="margin-left:0">Pull my full Slash history</button>
+        <span class="sub" style="margin:0">Everything, once. Days before your start date become history that never moves your balance.</span>
+      </div>
       ${s.settings.slashSync?.lastSyncMs?`<div class="sub" style="margin-top:8px">Last sync ${new Date(s.settings.slashSync.lastSyncMs).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})} · ${esc(s.settings.slashSync.lastResult||"")}</div>`:""}
       ${s.settings.slashSync?.lastError?`<div class="runway low" style="margin-top:6px">Couldn't sync: ${esc(s.settings.slashSync.lastError)}</div>`:""}
     </div>
@@ -1291,6 +1303,7 @@ function renderSettings(){
   document.getElementById("ssUrl").onchange = ssSave;
   document.getElementById("ssTok").onchange = ssSave;
   document.getElementById("ssSync").onclick = ()=>{ ssSave(); syncSlash(true); };
+  document.getElementById("ssFull").onclick = ()=>{ ssSave(); syncSlash(true, true); };
   document.getElementById("wipeBtn").onclick = ()=>{
     const ym = document.getElementById("wipeMonth").value;
     if (!ym) { wipeMsg = "Pick a month first."; render(); return; }
@@ -1549,6 +1562,7 @@ function renderMain(){
       <div class="tabs"><button class="tab ${view==="day"?"on":""}" data-view="day">This day</button><button class="tab ${view==="month"?"on":""}" data-view="month">Month</button><button class="tab ${view==="all"?"on":""}" data-view="all">All days</button></div>
     </div>
     <div id="page" class="${slideCls}">
+    ${sandboxBarHTML()}
     <div class="dayhead">${(()=>{ const d = dayDiff(todayISO(), date);
       const tag = d===0?"Today":d===-1?"Yesterday":d===1?"Tomorrow":d<0?`${-d} days ago`:`In ${d} days`;
       return `<span class="daytag${d===0?" now":""}">${tag}</span>`; })()}${pretty(date)}</div>
@@ -1584,6 +1598,12 @@ function renderMain(){
   const fab = document.getElementById("fab");
   if (fab) fab.onclick = ()=>{ const el = document.querySelector('[data-f="name"][data-k="out"]'); if (el) { el.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "center" }); el.focus({ preventScroll: true }); } };
   lastAddedId = null;
+  const sbOn = document.getElementById("sbOn");
+  if (sbOn) sbOn.onclick = ()=>{ sandbox = structuredClone(s); render(); toast("Sandbox on — nothing is saved until you keep it"); };
+  const sbKeep = document.getElementById("sbKeep");
+  if (sbKeep) sbKeep.onclick = ()=>{ sandbox = null; save(); render(); toast("Kept"); };
+  const sbDiscard = document.getElementById("sbDiscard");
+  if (sbDiscard) sbDiscard.onclick = ()=>{ s = sandbox; sandbox = null; render(); toast("Discarded — back to your real numbers"); };
   const pt = document.getElementById("pendTray");
   if (pt) pt.onclick = ()=>{ showPendTray = !showPendTray; render(); };
   document.querySelectorAll("[data-psettle]").forEach(b=>b.onclick=()=>{

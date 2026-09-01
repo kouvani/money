@@ -236,3 +236,5 @@ button.chip:hover{transform:translateY(-1px);background:var(--surface)}
 @media (max-width:640px){.cell .huge{font-size:34px}}
 .toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,12px);opacity:0;background:var(--ink);color:var(--paper);padding:10px 16px;font-size:12.5px;border-radius:11px;box-shadow:var(--shadow);z-index:30;pointer-events:none;transition:opacity .22s ease,transform .22s ease}
 .toast.show{opacity:1;transform:translate(-50%,0)}
+.sandbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:10px 14px;background:var(--outSoft);border:1px solid var(--outSoft);border-radius:var(--radius-s);color:var(--out);font-size:13px;animation:fadeDown .2s ease}
+.sandbar .link{color:var(--out)}
