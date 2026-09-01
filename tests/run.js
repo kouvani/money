@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -503,6 +503,20 @@ const round2 = n => Math.round(n * 100) / 100;
   applySlashImport(st, plan);
   assert("a second sync of the same items adds nothing", planFromRecords(st, recsFromSlashApi(items)).adds.length === 0);
   assert("ISO timestamps convert to local dates", isoToLocalISO("2026-09-01T12:00:00.000Z") === "2026-09-01" && isoToLocalISO("") === null);
+}
+
+// 26. Ledger: running balance after each checked entry agrees with the day math
+{
+  const st = structuredClone(SEED);
+  st.items[1].checked = true; // Chargeblast paid Aug 31
+  st.items.push({ id: "l1", kind: "in", date: "2026-09-02", name: "Kurv payout", usd: 2000, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push({ id: "l2", kind: "out", date: "2026-09-03", name: "Meta ads", usd: 300, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.adjust = { "2026-09-02": -100 };
+  const rows = ledgerRows(st);
+  assert("ledger is newest first with unchecked rows showing no balance", rows[0].x.id === "l2" && rows[0].bal === null);
+  const after = id => rows.find(r => r.x.id === id).bal;
+  assert("balance after each checked row matches calc for that day", Math.round(after("l1")*100)/100 === Math.round(calc(st, "2026-09-02").end*100)/100 && Math.round(after("o2")*100)/100 === Math.round(calc(st, "2026-08-31").end*100)/100);
+  assert("adjustments land in the running balance", Math.round(after("l1")*100)/100 === 8758.01);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

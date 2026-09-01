@@ -599,6 +599,8 @@ function statusChipsHTML(m){
   const pend = s.items.filter(x => x.settle === "pending");
   if (pend.length) chips.push(`<button class="chip${showPendTray?" on":""}" id="pendTray"><span class="dot"></span><b>${pend.length}</b> waiting to settle</button>`);
   if (m.pendingEarlier > 0 && view === "day") chips.push(`<button class="chip warn" data-view="all"><span class="dot"></span><b>${m.pendingEarlier}</b> unchecked from earlier days</button>`);
+  const bb = s.settings.slashSync?.balance;
+  if (bb) { const diff = bb.available - calc(s, t).end; if (Math.abs(diff) > 1) chips.push(`<button class="chip warn" data-nav="settings"><span class="dot"></span>Off from Slash by <b>${fmtP(diff)}</b></button>`); else chips.push(`<span class="chip good"><span class="dot"></span>Matches <b>Slash</b></span>`); }
   const g = s.goals.sort((a, b) => a.targetDate.localeCompare(b.targetDate))[0];
   if (g) { const gi = goalInfo(s, g, t); chips.push(`<button class="chip${gi.reached?" good":gi.behind?" warn":""}" data-nav="goals"><span class="dot"></span>${g.name?esc(g.name):"Goal"} <b>${gi.reached?"reached":Math.round(gi.pct*100)+"%"}</b></button>`); }
   return `<div class="chips num">${chips.join("")}</div>`;
@@ -934,7 +936,12 @@ async function syncSlash(manual, full){
     const plan = planFromRecords(s, recsFromSlashApi(j.items));
     const n = plan.adds.length + plan.updates.length;
     if (n) { armUndo(structuredClone(s)); applySlashImport(s, plan); }
-    s.settings.slashSync = { ...c, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} settled` : "nothing new", lastError: "" };
+    let balance = c.balance || null;
+    try {
+      const rb = await fetch(`${c.url.replace(/\/+$/, "")}/balance`, { headers: { Authorization: `Bearer ${c.token}` } });
+      if (rb.ok) { const b = await rb.json(); if (typeof b.available === "number") balance = { available: b.available, posted: b.posted, accounts: b.accounts || [], at: Date.now() }; }
+    } catch {}
+    s.settings.slashSync = { ...c, balance, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} settled` : "nothing new", lastError: "" };
     save();
     if (n || manual) render();
     if (n) toast(`Slash: ${plan.adds.length} new${plan.updates.length ? `, ${plan.updates.length} settled` : ""}`);
@@ -1068,7 +1075,41 @@ function listHTML(kind, items){
   </div>`;
 }
 
+// Every entry since the start date, newest first, with the balance after each checked one.
+function ledgerRows(st){
+  const items = st.items.filter(x => x.date >= st.startDate).sort((a, b) => a.date.localeCompare(b.date));
+  const adj = st.adjust || {};
+  const adjDates = Object.keys(adj).sort();
+  let bal = st.startBudget, ai = 0;
+  const rows = [];
+  for (const x of items) {
+    while (ai < adjDates.length && adjDates[ai] <= x.date) { bal += adj[adjDates[ai]]; ai++; }
+    if (x.checked) bal += x.kind === "in" ? x.usd : -x.usd;
+    rows.push({ x, bal: x.checked ? bal : null });
+  }
+  return rows.reverse();
+}
+
+let allMode = "days";
+function ledgerHTML(){
+  const rows = ledgerRows(s).filter(r => matchesSearch(s, r.x, searchQ));
+  if (!rows.length) return '<div style="color:var(--muted)">Nothing matches.</div>';
+  const shown = rows.slice(0, 400);
+  const status = x => x.checked ? (x.settle === "pending" ? "held" : x.settle ? "settled" : "done") : (x.settle === "pending" ? "authorized" : "expected");
+  return `<div class="ledgerwrap"><table class="ledger num">
+    <thead><tr><th>Date</th><th>What</th><th>Status</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th></tr></thead>
+    <tbody>${shown.map(({ x, bal }) => `<tr class="${x.checked ? "" : "pend"}">
+      <td>${prettyShort(x.date)}</td>
+      <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${x.cadFixed != null ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
+      <td class="sub" style="margin:0">${status(x)}</td>
+      <td style="text-align:right;color:${x.kind === "in" ? "var(--in)" : "var(--out)"};font-weight:600">${x.kind === "in" ? "+" : "−"}${fmtPbare(x.usd)}</td>
+      <td style="text-align:right;color:${bal == null ? "var(--muted)" : bal < 0 ? "var(--out)" : "var(--ink)"}">${bal == null ? "—" : fmtPbare(bal)}</td>
+    </tr>`).join("")}</tbody></table></div>
+    ${rows.length > shown.length ? `<div class="sub" style="margin-top:8px">Showing the latest ${shown.length} of ${rows.length} — search to narrow.</div>` : ""}`;
+}
+
 function allListHTML(){
+  if (allMode === "table") return ledgerHTML();
   const list = s.items.filter(x => matchesSearch(s, x, searchQ));
   if (!s.items.length) return '<div style="color:var(--muted)">Nothing logged on any day yet.</div>';
   if (!list.length) return '<div style="color:var(--muted)">Nothing matches.</div>';
@@ -1260,6 +1301,15 @@ function renderSettings(){
       </div>
       ${s.settings.slashSync?.lastSyncMs?`<div class="sub" style="margin-top:8px">Last sync ${new Date(s.settings.slashSync.lastSyncMs).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})} · ${esc(s.settings.slashSync.lastResult||"")}</div>`:""}
       ${s.settings.slashSync?.lastError?`<div class="runway low" style="margin-top:6px">Couldn't sync: ${esc(s.settings.slashSync.lastError)}</div>`:""}
+      ${(()=>{ const b = s.settings.slashSync?.balance; if (!b) return "";
+        const leftToday = calc(s, todayISO()).end; const diff = b.available - leftToday;
+        return `<div class="recon num">
+          <span>Slash available: <b>${fmtP(b.available)}</b></span>
+          <span>Tracker today: <b>${fmtP(leftToday)}</b></span>
+          <span style="color:${Math.abs(diff)>0.005?"var(--out)":"var(--in)"}">Difference: <b>${fmtP(diff)}</b></span>
+          ${Math.abs(diff)>0.005?`<button class="btn btn2" id="reconBtn" style="padding:7px 12px;font-size:12px">Match Slash today</button>`:"<span>In sync.</span>"}
+          <span class="sub" style="margin:0">Slash figure as of ${new Date(b.at).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}. Matching adds a start-of-day adjustment for today — never an entry.</span>
+        </div>`; })()}
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -1304,6 +1354,13 @@ function renderSettings(){
   document.getElementById("ssTok").onchange = ssSave;
   document.getElementById("ssSync").onclick = ()=>{ ssSave(); syncSlash(true); };
   document.getElementById("ssFull").onclick = ()=>{ ssSave(); syncSlash(true, true); };
+  const rb = document.getElementById("reconBtn");
+  if (rb) rb.onclick = ()=>{
+    const b = s.settings.slashSync?.balance; if (!b) return;
+    const t = todayISO(); const diff = b.available - calc(s, t).end;
+    s.adjust = s.adjust || {}; s.adjust[t] = (s.adjust[t] || 0) + diff;
+    save(); render(); toast("Matched Slash — today's start adjusted");
+  };
   document.getElementById("wipeBtn").onclick = ()=>{
     const ym = document.getElementById("wipeMonth").value;
     if (!ym) { wipeMsg = "Pick a month first."; render(); return; }
@@ -1544,7 +1601,10 @@ function renderMain(){
     body = monthHTML();
   } else {
     body = `<div style="margin-top:36px">
-      <input id="search" type="search" value="${esc(searchQ)}" placeholder="Search name, vendor, note, amount" aria-label="Search entries" style="max-width:340px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="search" type="search" value="${esc(searchQ)}" placeholder="Search name, vendor, note, amount" aria-label="Search entries" style="max-width:340px">
+        <div class="tabs" style="margin-left:0"><button class="tab ${allMode==="days"?"on":""}" data-allmode="days">By day</button><button class="tab ${allMode==="table"?"on":""}" data-allmode="table">Ledger</button></div>
+      </div>
       <div id="allList" style="margin-top:18px">${allListHTML()}</div>
     </div>`;
   }
@@ -1828,7 +1888,7 @@ function bindShared(){
       const x = s.items.find(i=>i.id===sel.dataset.settle);
       x.settle = sel.value === "settled" ? todayISO() : (sel.value || null);
       if (sel.value === "settled" && !x.checked) x.checked = true; // settled money is real money
-      if (sel.value === "pending") x.checked = false;              // authorized money isn't usable yet
+      if (sel.value === "pending") x.checked = x.kind === "out";   // a pending debit is already gone; pending money in is not yours yet
       save(); render();
     };
   });
@@ -1962,6 +2022,7 @@ function bindMain(){
     bindShared();
   };
   app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ view=b.dataset.nav; render(); });
+  app.querySelectorAll("[data-allmode]").forEach(b=>b.onclick=()=>{ allMode=b.dataset.allmode; render(); });
 }
 
 function add(kind){
@@ -1985,7 +2046,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows };
 } else {
   s = load();
   date = s.lastDate || todayISO();

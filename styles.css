@@ -238,3 +238,12 @@ button.chip:hover{transform:translateY(-1px);background:var(--surface)}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 .sandbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 14px;padding:10px 14px;background:var(--outSoft);border:1px solid var(--outSoft);border-radius:var(--radius-s);color:var(--out);font-size:13px;animation:fadeDown .2s ease}
 .sandbar .link{color:var(--out)}
+.ledgerwrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.ledger{width:100%;border-collapse:collapse;font-size:13px}
+.ledger th{text-align:left;font-weight:500;color:var(--muted);font-size:11.5px;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+.ledger td{padding:9px 14px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+.ledger tr:last-child td{border-bottom:none}
+.ledger tr.pend td{opacity:.72}
+.ledger tbody tr:hover td{background:var(--surface)}
+.recon{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:12px;padding:12px 14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-s);font-size:12.5px;color:var(--muted)}
+.recon b{color:var(--ink)}
