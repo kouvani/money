@@ -92,6 +92,19 @@ let deleteAsk = null;
 let expandedId = null;
 let showDone = { in: false, out: false, proc: false };
 let editCarry = false;
+let lastRenderedDate = null;
+let dragId = null, dragCont = null;
+
+// Reorder within the master list so every view keeps the same order.
+function moveItem(st, id, targetId, after){
+  const from = st.items.findIndex(i => i.id === id);
+  if (from < 0) return;
+  const item = st.items.splice(from, 1)[0];
+  let to = st.items.findIndex(i => i.id === targetId);
+  if (to < 0) { st.items.splice(from, 0, item); return; }
+  if (after) to++;
+  st.items.splice(to, 0, item);
+}
 let accountsFilter = "all";
 let editAccId = null;
 let editStart = false;
@@ -249,6 +262,48 @@ function runwayInfo(st, today){
   return { burning: true, days: Math.max(0, Math.floor(cash / perDay)) };
 }
 
+// End-of-day balances for the trailing 30 days, drawn as a quiet line.
+function sparkData(st, today){
+  const pts = [];
+  for (let i = 29; i >= 0; i--) pts.push(calc(st, shift(today, -i)).end);
+  return pts;
+}
+
+function sparkSVG(pts){
+  const w = 150, h = 34, p = 3;
+  const min = Math.min(...pts), max = Math.max(...pts);
+  const span = max - min || 1;
+  const X = i => p + i * (w - 2 * p) / (pts.length - 1);
+  const Y = v => h - p - (v - min) * (h - 2 * p) / span;
+  const line = pts.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+  const color = pts[pts.length - 1] >= pts[0] ? "var(--in)" : "var(--out)";
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="none" role="img" aria-label="Balance over the last 30 days">
+    <polyline points="${line}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${X(pts.length-1).toFixed(1)}" cy="${Y(pts[pts.length-1]).toFixed(1)}" r="2.4" fill="${color}"/>
+  </svg>`;
+}
+
+// The strip's numbers glide to their new value instead of snapping.
+const prevNums = {};
+let lastAnimDate = null;
+const reduced = () => typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+function paintNum(id, val, fmtFn){
+  const el = document.getElementById(id);
+  if (!el) { prevNums[id] = val; return; }
+  const from = prevNums[id];
+  prevNums[id] = val;
+  el.textContent = fmtFn(val);
+  if (from == null || from === val || reduced() || lastAnimDate !== date) return;
+  const t0 = performance.now(), dur = 420;
+  const tick = now => {
+    if (document.getElementById(id) !== el) return;
+    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+    el.textContent = fmtFn(from + (val - from) * e);
+    if (p < 1) requestAnimationFrame(tick); else el.textContent = fmtFn(val);
+  };
+  requestAnimationFrame(tick);
+}
+
 function dueMark(x, today){
   if (x.checked) return "";
   if (x.date < today) return '<span class="mark">overdue</span>';
@@ -398,6 +453,7 @@ function rowHTML(x){
     </label>`:""}
   </div>` : "";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
+    <span class="drag" draggable="true" data-drag="${x.id}" title="Drag to reorder"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg></span>
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
     <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.checked&&x.settle==="pending"?'<span class="mark" style="color:var(--muted)">not settled</span>':""}${dueMark(x, todayISO())}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
@@ -405,8 +461,10 @@ function rowHTML(x){
   </label>${detail}`;
 }
 
-// Pending entries stay on top; done ones fold away behind one quiet line.
-function stackedRows(items, key){
+// Pending entries stay on top; done ones can fold away behind one quiet line.
+// Payouts and processor activity never fold — seeing them is the point.
+function stackedRows(items, key, fold){
+  if (!fold) return items.map(rowHTML).join(""); // exact user order, nothing hidden
   const pending = items.filter(x => !x.checked);
   const done = items.filter(x => x.checked);
   let html = pending.map(rowHTML).join("");
@@ -425,7 +483,7 @@ function listHTML(kind, items){
   return `<div>
     <div class="lh"><div class="sw" style="background:${isIn?"var(--in)":"var(--out)"}"></div><div class="lt">${isIn?"Coming in":"Going out"}</div></div>
     <div class="hint">${isIn?"Check it when the money lands":"Check it when you pay it"}</div>
-    ${items.length?stackedRows(items, kind):'<div class="empty">Nothing on this day.</div>'}
+    ${items.length?`<div data-rows="${kind}">${stackedRows(items, kind, kind==="out")}</div>`:'<div class="empty">Nothing on this day.</div>'}
     <div class="addrow">
       <div class="addgrid">
         <input data-f="name" data-k="${kind}" list="vendorNames" value="${esc(d.name)}" placeholder="${isIn?"Shopify payout":"Meta ads"}" aria-label="Name" autocomplete="off">
@@ -659,15 +717,32 @@ function renderMain(){
 
   let body;
   if (view==="day") {
-    const isProc = x => { const v = x.vendorId && s.vendors.find(z=>z.id===x.vendorId); return !!(v && v.isProcessor); };
-    const procT = [...m.inT, ...m.outT].filter(isProc).sort((a,b)=>a.kind===b.kind?0:a.kind==="in"?-1:1);
-    const inO = m.inT.filter(x=>!isProc(x)), outO = m.outT.filter(x=>!isProc(x));
-    const procBlock = procT.length ? `<div class="procblock">
-      <div class="lh"><div class="sw" style="background:var(--muted)"></div><div class="lt">Processors</div></div>
-      <div class="hint">Payouts, fees, reserves — check them when they hit</div>
-      ${stackedRows(procT, "proc")}
-    </div>` : "";
-    body = `<div class="cols">${listHTML("in", inO)}${listHTML("out", outO)}</div>${procBlock}`;
+    const procOf = x => { const v = x.vendorId && s.vendors.find(z=>z.id===x.vendorId); return (v && v.isProcessor) ? v : null; };
+    const procT = [...m.inT, ...m.outT].filter(x=>procOf(x));
+    const inO = m.inT.filter(x=>!procOf(x)), outO = m.outT.filter(x=>!procOf(x));
+    // one card per processor: its payout with its fees and debits, together
+    let procBlock = "";
+    if (procT.length) {
+      const byVendor = new Map();
+      for (const x of procT) { const v = procOf(x); if (!byVendor.has(v.id)) byVendor.set(v.id, { v, items: [] }); byVendor.get(v.id).items.push(x); }
+      const cards = [...byVendor.values()].map(({ v, items }) => {
+        const net = items.filter(x=>x.checked).reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
+        const pending = items.filter(x=>!x.checked).length;
+        return `<div class="pcard">
+          <div class="pcard-h">
+            <button class="namebtn pname" data-vopen="${v.id}">${esc(v.name)}</button>
+            <span class="pnet num" style="color:${net<0?"var(--out)":"var(--in)"}">${net>=0?"+":""}${fmt(net,"")}${pending?`<span class="tinylink" style="text-decoration:none">${pending} pending</span>`:""}</span>
+          </div>
+          <div data-rows="p${v.id}">${stackedRows(items, "p"+v.id, false)}</div>
+        </div>`;
+      }).join("");
+      procBlock = `<div class="psec">
+        <div class="lh"><div class="sw" style="background:var(--muted)"></div><div class="lt">Processors</div></div>
+        <div class="hint">Each processor's payouts, fees, and debits together — check them when they hit</div>
+        <div class="pgrid">${cards}</div>
+      </div>`;
+    }
+    body = `${procBlock}<div class="cols">${listHTML("in", inO)}${listHTML("out", outO)}</div>`;
   } else if (view==="month") {
     body = monthHTML();
   } else {
@@ -677,6 +752,9 @@ function renderMain(){
     </div>`;
   }
 
+  let slideCls = "";
+  if (lastRenderedDate && date !== lastRenderedDate) slideCls = date > lastRenderedDate ? "slide-l" : "slide-r";
+  lastRenderedDate = date;
   document.getElementById("app").innerHTML = `
     ${datalistHTML()}
     <div class="datebar">
@@ -686,23 +764,26 @@ function renderMain(){
       ${isToday?"":'<button class="link" id="today">today</button>'}
       <div class="tabs"><button class="tab ${view==="day"?"on":""}" data-view="day">This day</button><button class="tab ${view==="month"?"on":""}" data-view="month">Month</button><button class="tab ${view==="all"?"on":""}" data-view="all">All days</button></div>
     </div>
+    <div id="page" class="${slideCls}">
     <div class="dayhead">${pretty(date)}</div>
     <div class="flow num">
       <div class="cell"><div class="lbl">${isStart?"Starting with":"Start of day"}</div><div>${startCell}</div></div>
-      <div class="cell"><div class="lbl" style="color:var(--in)">Came in</div><div><div class="big" style="color:var(--in)">+${fmt(m.inC,"")}</div>${m.inA>m.inC?`<div class="sub">of ${fmt(m.inA,"")} expected</div>`:""}</div></div>
-      <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)">−${fmt(m.outC,"")}</div>${m.outA>m.outC?`<div class="sub">of ${fmt(m.outA,"")} owed</div>`:""}</div></div>
-      <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}">${fmt(m.end)}</div><div class="sub">${fmt(m.end*s.rate,"C$")}</div></div></div>
+      <div class="cell"><div class="lbl" style="color:var(--in)">Came in</div><div><div class="big" style="color:var(--in)" id="numIn">+${fmt(m.inC,"")}</div>${m.inA>m.inC?`<div class="sub">of ${fmt(m.inA,"")} expected</div>`:""}</div></div>
+      <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)" id="numOut">−${fmt(m.outC,"")}</div>${m.outA>m.outC?`<div class="sub">of ${fmt(m.outA,"")} owed</div>`:""}</div></div>
+      <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}" id="numLeft">${fmt(m.end)}</div><div class="sub">${fmt(m.end*s.rate,"C$")}</div></div></div>
     </div>
     ${view==="day"?(()=>{ const r = runwayInfo(s, todayISO());
-      return r.burning
-        ? `<div class="runway num${r.days<30?" low":""}">Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.</div>`
-        : `<div class="runway num">At this month's pace, cash is growing.</div>`; })():""}
+      const text = r.burning
+        ? `Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.`
+        : "At this month's pace, cash is growing.";
+      return `<div class="pulse num">${sparkSVG(sparkData(s, todayISO()))}<span class="ptext${r.burning&&r.days<30?" low":""}">${text}</span></div>`; })():""}
     <div class="summary num">
       <span>All days so far: <b>${fmt(m.allTime)}</b></span>
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmt(m.ifAll)}</b></span>
       ${m.pendingEarlier>0&&view==="day"?`<button class="link" style="margin-left:0;color:var(--out)" data-view="all">${m.pendingEarlier} unchecked from earlier days</button>`:""}
     </div>
     ${body}
+    </div>
     <div class="foot">
       1 USD = ${s.rate.toFixed(4)} CAD<button class="link" id="rateToggle">change</button>
       ${showRate?`<input id="rateInput" type="number" step="0.0001" value="${s.rate}" style="width:110px;margin-left:10px;display:inline-block;padding:5px 8px" aria-label="USD to CAD rate">`:""}
@@ -714,6 +795,10 @@ function renderMain(){
     </div>
     ${undoChipHTML()}`;
   bindMain();
+  paintNum("numLeft", m.end, v=>fmt(v));
+  paintNum("numIn", m.inC, v=>"+"+fmt(v,""));
+  paintNum("numOut", m.outC, v=>"−"+fmt(Math.abs(v),""));
+  lastAnimDate = date;
 }
 
 function renderVendor(){
@@ -813,7 +898,6 @@ function renderVendors(){
       </div>`).join(""):'<div class="empty">No vendors yet. They appear as you log entries.</div>'}
   `;
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
-  document.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
 }
 
 function cadNote(kind){
@@ -829,6 +913,7 @@ function cadNote(kind){
 function bindShared(){
   const app = document.getElementById("app");
   bindUndo();
+  app.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
   app.querySelectorAll("[data-toggle]").forEach(c=>c.onchange=()=>{ const x=s.items.find(i=>i.id===c.dataset.toggle); x.checked=!x.checked; save(); render(); });
   app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -945,6 +1030,39 @@ function bindMain(){
   }
   if ($("clearAdj")) $("clearAdj").onclick = ()=>{ delete s.adjust[date]; save(); render(); };
   app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{ const k=b.dataset.donetoggle; showDone[k]=!showDone[k]; render(); });
+  // drag to reorder from anywhere on the row, within the same list on the same day
+  app.querySelectorAll("[data-drag]").forEach(h=>{ h.onclick = e=>e.preventDefault(); });
+  app.querySelectorAll("[data-rows] .row").forEach(row=>{
+    row.setAttribute("draggable", "true");
+    row.ondragstart = e=>{
+      const cont = row.closest("[data-rows]");
+      if (!cont || !row.dataset.id) { e.preventDefault(); return; }
+      dragId = row.dataset.id; dragCont = cont.dataset.rows;
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", dragId); } catch {}
+      requestAnimationFrame(()=>row.classList.add("dragging"));
+    };
+    row.ondragend = ()=>{ dragId = null; dragCont = null; app.querySelectorAll(".dragging,.drop-above,.drop-below").forEach(el=>el.classList.remove("dragging","drop-above","drop-below")); };
+    row.ondragover = e=>{
+      if (!dragId || row.closest("[data-rows]")?.dataset.rows !== dragCont) return;
+      e.preventDefault(); e.dataTransfer.dropEffect = "move";
+      const r = row.getBoundingClientRect();
+      const after = (e.clientY - r.top) > r.height / 2;
+      row.classList.toggle("drop-below", after);
+      row.classList.toggle("drop-above", !after);
+    };
+    row.ondragleave = ()=>row.classList.remove("drop-above","drop-below");
+    row.ondrop = e=>{
+      e.preventDefault();
+      const targetId = row.dataset.id;
+      const after = row.classList.contains("drop-below");
+      row.classList.remove("drop-above","drop-below");
+      if (!dragId || targetId === dragId) { dragId = null; return; }
+      moveItem(s, dragId, targetId, after);
+      dragId = null; dragCont = null;
+      save(); render();
+    };
+  });
   if ($("saveStart")) { const doSave=()=>{ const v=parseFloat($("startDraft").value); editStart=false; if(!isNaN(v)){ s.startBudget=v; s.startDate=date; } save(); render(); };
     $("saveStart").onclick=doSave; $("startDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editStart=false; render(); } }; }
   $("rateToggle").onclick = ()=>{ showRate=!showRate; render(); };
@@ -980,7 +1098,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData };
 } else {
   s = load();
   date = s.lastDate || todayISO();

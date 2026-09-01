@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -213,6 +213,24 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("earlier days are untouched", Math.round(calc(st, "2026-08-31").end*100)/100 === 5058.15);
   const md = monthData(st, "2026-09", "2026-09-02");
   assert("month figures include the adjustment", Math.round(md.days[0].end*100)/100 === 5000);
+}
+
+// 13. Drag order persists in the master list; sparkline tracks end-of-day balances
+{
+  const st = structuredClone(SEED);
+  st.items.push({ id: "o3", kind: "out", date: "2026-08-31", name: "Wise", usd: 10, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  moveItem(st, "o3", "o1", false);         // drag Wise above Chapa
+  assert("reorder moves the entry before its target", st.items.map(x=>x.id).join(",") === "o3,o1,o2");
+  moveItem(st, "o3", "o2", true);          // drag Wise below Chargeblast
+  assert("reorder can drop after a target", st.items.map(x=>x.id).join(",") === "o1,o2,o3");
+  moveItem(st, "o3", "missing", false);
+  assert("dropping on nothing changes nothing", st.items.map(x=>x.id).join(",") === "o1,o2,o3");
+
+  const st2 = structuredClone(SEED);
+  st2.items.forEach(x=>{ x.checked = true; });
+  const pts = sparkData(st2, "2026-09-01");
+  assert("sparkline covers 30 days and ends at today's balance", pts.length === 30 && Math.round(pts[29]*100)/100 === 5058.15);
+  assert("sparkline shows the drop on the day bills were paid", Math.round(pts[27]*100)/100 === 8403.01 && Math.round(pts[28]*100)/100 === 5058.15);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
