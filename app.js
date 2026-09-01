@@ -939,7 +939,7 @@ function renderGoals(){
           ? `${fmtP(g.targetUsd - gi.cash)} short of the date.`
           : `${prettyShort(g.targetDate)} · ${gi.daysLeft} ${gi.daysLeft===1?"day":"days"} left · needs +${fmtPbare(gi.needPerDay)}/day · pace ${gi.pace>=0?"+":"−"}${fmtPbare(Math.abs(gi.pace))}/day`;
       return `<div class="gcard">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding-right:24px">
           <div class="name" style="font-weight:600;font-size:15px">${g.name?esc(g.name):"Cash target"}</div>
           ${state}
         </div>
