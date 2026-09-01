@@ -375,9 +375,9 @@ function sparkData(st, today){
   return { past, future };
 }
 
-function sparkSVG(sd, today){
+function sparkSVG(sd, today, wide){
   const all = [...sd.past, ...sd.future];
-  const w = 170, h = 34, p = 3;
+  const w = wide ? 320 : 170, h = wide ? 56 : 34, p = 3;
   const min = Math.min(...all), max = Math.max(...all);
   const span = max - min || 1;
   const n = all.length;
@@ -567,9 +567,7 @@ function dayBriefText(sm, day, today){
   return parts.join(" ");
 }
 
-function dayBriefHTML(){
-  const t = todayISO();
-  const sm = daySummary(s, date);
+function weekBarsSVG(sm){
   const w = 168, h = 46, pad = 2, gap = 6, bw = (w - gap * 6) / 7, mid = 30;
   const maxAbs = Math.max(1, ...sm.bars.map(b => Math.abs(b.net)));
   const bars = sm.bars.map((b, i) => {
@@ -580,15 +578,59 @@ function dayBriefHTML(){
     return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${col}" opacity="${b.date === date ? 1 : .45}"><title>${prettyShort(b.date)} · ${fmtP(b.net)}</title></rect>
       <text x="${(x + bw / 2).toFixed(1)}" y="${h - 2}" text-anchor="middle" font-size="9" fill="var(--muted)">${wd}</text>`;
   }).join("");
-  return `<div class="brief">
-    <div class="brief-l">
-      <div class="lbl">Day in brief</div>
-      <p class="brief-text">${esc(dayBriefText(sm, date, t))}</p>
-    </div>
-    <svg class="brief-bars" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="Net per day, last 7 days">
-      <line x1="0" x2="${w}" y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="1"/>${bars}
-    </svg>
+  return `<svg class="week-bars" viewBox="0 0 ${w} ${h}" role="img" aria-label="Net per day, last 7 days"><line x1="0" x2="${w}" y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="1"/>${bars}</svg>`;
+}
+
+// One row of quiet, tappable status chips under the strip.
+function statusChipsHTML(m){
+  const t = todayISO();
+  const chips = [];
+  const r = runwayInfo(s, t);
+  chips.push(r.burning
+    ? `<span class="chip${r.days < 30 ? " warn" : ""}"><span class="dot"></span>Cash lasts <b>${r.days} ${r.days===1?"day":"days"}</b></span>`
+    : `<span class="chip good"><span class="dot"></span>Cash <b>growing</b></span>`);
+  const pend = s.items.filter(x => x.settle === "pending");
+  if (pend.length) chips.push(`<button class="chip${showPendTray?" on":""}" id="pendTray"><span class="dot"></span><b>${pend.length}</b> waiting to settle</button>`);
+  if (m.pendingEarlier > 0 && view === "day") chips.push(`<button class="chip warn" data-view="all"><span class="dot"></span><b>${m.pendingEarlier}</b> unchecked from earlier days</button>`);
+  const g = s.goals.sort((a, b) => a.targetDate.localeCompare(b.targetDate))[0];
+  if (g) { const gi = goalInfo(s, g, t); chips.push(`<button class="chip${gi.reached?" good":gi.behind?" warn":""}" data-nav="goals"><span class="dot"></span>${g.name?esc(g.name):"Goal"} <b>${gi.reached?"reached":Math.round(gi.pct*100)+"%"}</b></button>`); }
+  return `<div class="chips num">${chips.join("")}</div>`;
+}
+
+function pendTrayHTML(){
+  if (!showPendTray) return "";
+  const t = todayISO();
+  const pend = s.items.filter(x => x.settle === "pending").sort((a, b) => a.date.localeCompare(b.date));
+  if (!pend.length) return "";
+  const notCounted = pend.filter(x => !x.checked).reduce((tt, x) => tt + (x.kind === "in" ? x.usd : -x.usd), 0);
+  return `<div class="pendlist num">
+    ${Math.abs(notCounted) > 0.004 ? `<div class="sub" style="padding:10px 0 4px">${fmtP(notCounted)} of this isn't counted in Left yet.</div>` : ""}
+    ${pend.map(x => {
+      const exp = nextBusinessDay(x.date), late = exp < t;
+      return `<div class="row" style="cursor:default">
+        <div class="name">${esc(x.name)}<span class="tinytag">${prettyShort(x.date)}</span><span class="${late?"mark":"notetxt"}">${late?"expected "+prettyShort(exp):"settles ~"+prettyShort(exp)}</span></div>
+        <div class="amt num"><div class="u" style="color:${x.kind==="in"?"var(--in)":"var(--out)"}">${x.kind==="in"?"+":"−"}${fmtPbare(x.usd)}</div></div>
+        <button class="btn" data-psettle="${x.id}" style="padding:6px 12px;font-size:12px">Settled</button>
+      </div>`; }).join("")}
   </div>`;
+}
+
+// The reflective card at the bottom of the day: trend, week, the day in words.
+function dayBriefHTML(m){
+  const t = todayISO();
+  const sm = daySummary(s, date);
+  const ins = insightsFor(s, t)[0];
+  return `<section class="pulsecard num">
+    <div class="pulse-grid">
+      <div><div class="lbl">Balance · last 30 days, next 7 dotted</div>${sparkSVG(sparkData(s, t), t, true)}</div>
+      <div><div class="lbl">Net per day · this week</div>${weekBarsSVG(sm)}</div>
+    </div>
+    <p class="brief-text">${esc(dayBriefText(sm, date, t))}</p>
+    <div class="pulse-foot">
+      ${ins ? `<span${ins.tone==="warn"?' style="color:var(--out)"':""}>${ins.text}</span>` : ""}
+      <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
+    </div>
+  </section>`;
 }
 
 // ---- month ----
@@ -1436,48 +1478,10 @@ function renderMain(){
       <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)" id="numOut">−${fmtPbare(m.outC)}</div>${m.outA>m.outC?`<div class="sub">of ${fmtPbare(m.outA)} owed</div>`:""}</div></div>
       <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}" id="numLeft">${fmtP(m.end)}</div><button class="bare sub" id="flipCur" title="Show ${cadFirst()?"US dollars":"Canadian dollars"} first" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${fmtSec(m.end)}</button></div></div>
     </div>
-    ${view==="day"?(()=>{ const t = todayISO();
-      const r = runwayInfo(s, t);
-      const rText = r.burning
-        ? `Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.`
-        : "At this month's pace, cash is growing.";
-      const g = s.goals.filter(x=>!x.dismissed).sort((a,b)=>a.targetDate.localeCompare(b.targetDate))[0];
-      let goalLine = "";
-      if (g) {
-        const gi = goalInfo(s, g, t);
-        goalLine = gi.reached
-          ? `<span class="ptext">Goal reached: ${fmtP(g.targetUsd)}${g.name?` — ${esc(g.name)}`:""}.</span>`
-          : `<span class="ptext${gi.behind?" low":""}">${g.name?esc(g.name)+" — ":""}${fmtP(g.targetUsd)} by ${prettyShort(g.targetDate)} · ${Math.round(gi.pct*100)}% there${gi.needPerDay>0?` · needs +${fmtPbare(gi.needPerDay)}/day`:""}</span>
-             <span class="gbar" aria-hidden="true"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>`;
-      }
-      const ins = insightsFor(s, t)[0];
-      return `<div class="pulse num">${sparkSVG(sparkData(s, t), t)}
-        <div class="pstack">
-          <span class="ptext${r.burning&&r.days<30?" low":""}">${rText}</span>
-          ${goalLine}
-          ${ins?`<span class="ptext${ins.tone==="warn"?" low":""}">${ins.text}</span>`:""}
-        </div>
-      </div>`; })():""}
-    ${(()=>{ const pend = s.items.filter(x=>x.settle==="pending").sort((a,b)=>a.date.localeCompare(b.date));
-      if (!pend.length) return "";
-      const notCounted = pend.filter(x=>!x.checked).reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
-      const t = todayISO();
-      return `<div class="summary num"><span><b>${pend.length}</b> waiting to settle${Math.abs(notCounted)>0.004?` — <b>${fmtP(notCounted)}</b> not counted in Left yet`:""}<button class="link" id="pendTray">${showPendTray?"hide":"review"}</button></span></div>
-      ${showPendTray?`<div class="pendlist">${pend.map(x=>{
-        const exp = nextBusinessDay(x.date);
-        const late = exp < t;
-        return `<div class="row" style="cursor:default">
-          <div class="name">${esc(x.name)}<span class="tinytag">${prettyShort(x.date)}</span><span class="${late?"mark":"notetxt"}">${late?"expected "+prettyShort(exp):"settles ~"+prettyShort(exp)}</span></div>
-          <div class="amt num"><div class="u" style="color:${x.kind==="in"?"var(--in)":"var(--out)"}">${x.kind==="in"?"+":"−"}${fmtPbare(x.usd)}</div></div>
-          <button class="btn" data-psettle="${x.id}" style="padding:6px 12px;font-size:12px">Settled</button>
-        </div>`;}).join("")}</div>`:""}`; })()}
-    <div class="summary num">
-      <span>All days so far: <b>${fmtP(m.allTime)}</b></span>
-      <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
-      ${m.pendingEarlier>0&&view==="day"?`<button class="link" style="margin-left:0;color:var(--out)" data-view="all">${m.pendingEarlier} unchecked from earlier days</button>`:""}
-    </div>
-    ${view==="day"?dayBriefHTML():""}
+    ${statusChipsHTML(m)}
+    ${pendTrayHTML()}
     ${body}
+    ${view==="day"?dayBriefHTML(m):""}
     ${sectionNavHTML()}
     ${view==="day"?'<button class="fab" id="fab" aria-label="New entry"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button>':""}
     </div>
