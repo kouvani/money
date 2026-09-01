@@ -1280,16 +1280,22 @@ function renderMain(){
       const cards = [...byVendor.values()].map(({ v, items }) => {
         const net = items.filter(x=>x.checked).reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
         const pending = items.filter(x=>!x.checked).length;
-        // payouts and anything pending stay in sight; paid fees and debits fold behind one line
+        // one line per direction: total incoming, total outgoing — tap to see the entries.
+        // A direction with something pending opens itself so the checkbox is reachable.
         const key = "p" + v.id;
-        const visible = items.filter(x => x.kind === "in" || !x.checked);
-        const folded = items.filter(x => x.kind === "out" && x.checked);
-        let rowsHtml = visible.map(rowHTML).join("");
-        if (folded.length) {
-          const fnet = folded.reduce((t, x) => t - x.usd, 0);
-          rowsHtml += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key]?"true":"false"}">${folded.length} ${folded.length===1?"debit":"debits"} paid · ${fmtP(fnet)}<span class="tinylink">${showDone[key]?"hide":"show"}</span></button>`;
-          if (showDone[key]) rowsHtml += folded.map(rowHTML).join("");
-        }
+        let rowsHtml = [["in", "Incoming"], ["out", "Outgoing"]].map(([kind, label]) => {
+          const list = items.filter(x => x.kind === kind);
+          if (!list.length) return "";
+          const k2 = key + kind;
+          const total = list.reduce((t, x) => t + x.usd, 0);
+          const pend = list.filter(x => !x.checked).length;
+          const open = showDone[k2] !== undefined ? showDone[k2] : pend > 0;
+          return `<button class="prow num" data-donetoggle="${k2}" data-cur="${open?1:0}" aria-expanded="${open?"true":"false"}">
+            <span class="plabel">${label} · ${list.length}${pend?` · ${pend} pending`:""}</span>
+            <span class="pamt" style="color:${kind==="in"?"var(--in)":"var(--out)"}">${kind==="in"?"+":"−"}${fmtPbare(total)}</span>
+            <svg class="pchev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 2.5L8 6l-3.8 3.5"/></svg>
+          </button>${open ? list.map(rowHTML).join("") : ""}`;
+        }).join("");
         if (!rowsHtml) rowsHtml = '<div class="empty">Nothing today.</div>';
         return `<div class="pcard">
           <div class="pcard-h">
@@ -1665,7 +1671,11 @@ function bindMain(){
     $("carryDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editCarry=false; render(); } };
   }
   if ($("clearAdj")) $("clearAdj").onclick = ()=>{ delete s.adjust[date]; save(); render(); };
-  app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{ const k=b.dataset.donetoggle; showDone[k]=!showDone[k]; render(); });
+  app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{
+    const k=b.dataset.donetoggle;
+    showDone[k] = b.dataset.cur != null ? b.dataset.cur !== "1" : !showDone[k];
+    render();
+  });
   // drag to reorder from anywhere on the row, within the same list on the same day
   app.querySelectorAll("[data-drag]").forEach(h=>{ h.onclick = e=>e.preventDefault(); });
   app.querySelectorAll("[data-rows] .row").forEach(row=>{
