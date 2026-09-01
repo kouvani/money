@@ -142,7 +142,8 @@ const round2 = n => Math.round(n * 100) / 100;
   const d15 = md.days.find(d => d.date === "2026-08-15");
   const d31 = md.days.find(d => d.date === "2026-08-31");
   assert("dots reflect in/out entries", d15.hasIn && !d15.hasOut && d31.hasOut);
-  assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 10403.01 && Math.round(d31.end*100)/100 === 8858.01);
+  assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 2000 && Math.round(d31.end*100)/100 === 8858.01);
+  assert("days before the start date hold no starting money", Math.round(md.days.find(d=>d.date==="2026-08-01").end*100)/100 === 0);
   assert("past days with unchecked entries are marked", d31.warn === true && d15.warn === false);
   assert("august 2026 starts on a saturday", md.offset === 6 && md.days.length === 31);
 }
@@ -230,7 +231,7 @@ const round2 = n => Math.round(n * 100) / 100;
   st2.items.forEach(x=>{ x.checked = true; });
   const pts = sparkData(st2, "2026-09-01");
   assert("sparkline covers 30 days and ends at today's balance", pts.length === 30 && Math.round(pts[29]*100)/100 === 5058.15);
-  assert("sparkline shows the drop on the day bills were paid", Math.round(pts[27]*100)/100 === 8403.01 && Math.round(pts[28]*100)/100 === 5058.15);
+  assert("sparkline is zero before the start, then jumps on Aug 31", Math.round(pts[27]*100)/100 === 0 && Math.round(pts[28]*100)/100 === 5058.15);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

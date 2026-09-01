@@ -119,7 +119,8 @@ function calc(st, day){
   // a start-of-day correction on day D counts from D onward, without being money in or out
   const adjUpTo = Object.keys(adj).filter(d => d <= day).reduce((t, d) => t + adj[d], 0);
   const adjAll = Object.values(adj).reduce((t, v) => t + v, 0);
-  const carry = st.startBudget + adjUpTo + st.items.filter(x=>x.checked && x.date<day).reduce((t,x)=>t+sgn(x),0);
+  // money starts existing on the start date; every day before it is zero
+  const carry = (day >= st.startDate ? st.startBudget : 0) + adjUpTo + st.items.filter(x=>x.checked && x.date<day).reduce((t,x)=>t+sgn(x),0);
   const today = st.items.filter(x=>x.date===day);
   const inT = today.filter(x=>x.kind==="in"), outT = today.filter(x=>x.kind==="out");
   const sum = (a,only) => a.filter(x=>!only||x.checked).reduce((t,x)=>t+x.usd,0);
@@ -710,7 +711,7 @@ function renderMain(){
     startCell = editCarry
       ? `<div style="display:flex;gap:6px;align-items:center"><input id="carryDraft" type="number" step="0.01" value="${round2(m.carry).toFixed(2)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Start of day"><button class="btn" id="saveCarry" style="padding:6px 10px;font-size:12px">Save</button></div>`
       : `<button class="bare num big" id="editCarry">${fmt(m.carry)}<span class="tinylink">edit</span></button>
-         <div class="sub">${a ? `adjusted ${fmt(a)}<button class="link" id="clearAdj">clear</button>` : "carried from before"}</div>`;
+         <div class="sub">${a ? `adjusted ${fmt(a)}<button class="link" id="clearAdj">clear</button>` : date < s.startDate ? "before the start" : "carried from before"}</div>`;
   }
   const endColor = m.end<0 ? "var(--out)" : "var(--in)";
   const endFill = m.end<0 ? "var(--outSoft)" : "var(--inSoft)";
