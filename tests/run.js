@@ -200,6 +200,21 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("dismissed -> quiet for 30 days", backupDue(st, "2026-09-01") === false);
 }
 
+// 12. Start-of-day adjustments: fix the carry without counting as money in or out
+{
+  const st = structuredClone(SEED);
+  st.items.forEach(x => { x.checked = true; });
+  const before = calc(st, "2026-09-01");
+  st.adjust = { "2026-09-01": -58.15 };
+  const m = calc(st, "2026-09-01");
+  assert("adjustment moves the start of day", Math.round(m.carry*100)/100 === Math.round((before.carry - 58.15)*100)/100);
+  assert("adjustment moves Left and all-time the same way", Math.round(m.end*100)/100 === 5000 && Math.round(m.allTime*100)/100 === 5000);
+  assert("adjustment is not money in or out", m.inC === before.inC && m.outC === before.outC);
+  assert("earlier days are untouched", Math.round(calc(st, "2026-08-31").end*100)/100 === 5058.15);
+  const md = monthData(st, "2026-09", "2026-09-02");
+  assert("month figures include the adjustment", Math.round(md.days[0].end*100)/100 === 5000);
+}
+
 // 4. Offline shell: every file the service worker precaches exists on disk
 {
   const sw = fs.readFileSync(path.join(root, "sw.js"), "utf8");

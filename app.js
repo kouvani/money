@@ -3,6 +3,7 @@ const LEGACY_KEY = "daydreamz-money-v5";
 const SEED = {
   version: 6,
   startDate: "2026-08-31", startBudget: 8403.01, rate: 1.389, lastDate: null,
+  adjust: {},
   accounts: [],
   vendors: [],
   items: [
@@ -48,14 +49,16 @@ function ensure(st){
   st.vendors = st.vendors || [];
   st.items = st.items || [];
   st.settings = Object.assign({ theme: "system", currencyDisplay: "both", warnDaysAhead: 3 }, st.settings || {});
+  st.adjust = st.adjust || {};
   st.vendors.forEach(v => {
     v.note = v.note ?? ""; v.url = v.url ?? ""; v.cadence = v.cadence ?? null;
     v.dayOfMonth = v.dayOfMonth ?? null; v.defaultAccountId = v.defaultAccountId ?? null;
-    v.skipDates = v.skipDates ?? [];
+    v.skipDates = v.skipDates ?? []; v.isProcessor = v.isProcessor ?? false;
   });
   st.items.forEach(x => {
     x.cadFixed = x.cadFixed ?? null; x.accountId = x.accountId ?? null; x.vendorId = x.vendorId ?? null;
     x.note = x.note ?? ""; x.receiptUrl = x.receiptUrl ?? ""; x.recurringSourceId = x.recurringSourceId ?? null;
+    x.settle = x.settle ?? null; // null = untracked, "pending" = authorized not settled, ISO date = settled
   });
   const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
   st.accounts.forEach((a, i) => {
@@ -87,6 +90,8 @@ let searchQ = "";
 let openVendorId = null;
 let deleteAsk = null;
 let expandedId = null;
+let showDone = { in: false, out: false, proc: false };
+let editCarry = false;
 let accountsFilter = "all";
 let editAccId = null;
 let editStart = false;
@@ -97,14 +102,18 @@ function save(){ s.lastDate = date; try { localStorage.setItem(KEY, JSON.stringi
 
 function calc(st, day){
   const sgn = x => x.kind==="in" ? x.usd : -x.usd;
-  const carry = st.startBudget + st.items.filter(x=>x.checked && x.date<day).reduce((t,x)=>t+sgn(x),0);
+  const adj = st.adjust || {};
+  // a start-of-day correction on day D counts from D onward, without being money in or out
+  const adjUpTo = Object.keys(adj).filter(d => d <= day).reduce((t, d) => t + adj[d], 0);
+  const adjAll = Object.values(adj).reduce((t, v) => t + v, 0);
+  const carry = st.startBudget + adjUpTo + st.items.filter(x=>x.checked && x.date<day).reduce((t,x)=>t+sgn(x),0);
   const today = st.items.filter(x=>x.date===day);
   const inT = today.filter(x=>x.kind==="in"), outT = today.filter(x=>x.kind==="out");
   const sum = (a,only) => a.filter(x=>!only||x.checked).reduce((t,x)=>t+x.usd,0);
   const inC=sum(inT,true), inA=sum(inT), outC=sum(outT,true), outA=sum(outT);
   const end = carry + inC - outC;
-  const allTime = st.startBudget + st.items.filter(x=>x.checked).reduce((t,x)=>t+sgn(x),0);
-  const ifAll = st.startBudget + st.items.reduce((t,x)=>t+sgn(x),0);
+  const allTime = st.startBudget + adjAll + st.items.filter(x=>x.checked).reduce((t,x)=>t+sgn(x),0);
+  const ifAll = st.startBudget + adjAll + st.items.reduce((t,x)=>t+sgn(x),0);
   const pendingEarlier = st.items.filter(x=>!x.checked && x.date<day).length;
   const dates = [...new Set(st.items.map(x=>x.date))].sort().reverse();
   return { carry,inT,outT,inC,inA,outC,outA,end,allTime,ifAll,pendingEarlier,dates };
@@ -233,7 +242,8 @@ function runwayInfo(st, today){
   const from = shift(today, -30);
   const win = st.items.filter(x => x.checked && x.date > from && x.date <= today);
   const net = win.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
-  const cash = st.startBudget + st.items.filter(x => x.checked).reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+  const cash = st.startBudget + Object.values(st.adjust || {}).reduce((t, v) => t + v, 0)
+    + st.items.filter(x => x.checked).reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
   if (net >= 0) return { burning: false, days: null };
   const perDay = -net / 30;
   return { burning: true, days: Math.max(0, Math.floor(cash / perDay)) };
@@ -379,13 +389,33 @@ function rowHTML(x){
     </label>`:""}
     <input data-note="${x.id}" value="${esc(x.note)}" placeholder="Note" aria-label="Note for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
     <input data-receipt="${x.id}" value="${esc(x.receiptUrl)}" placeholder="Receipt link" aria-label="Receipt link for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
+    ${x.checked?`<label class="sub" style="margin:0">Settlement
+      <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
+        <option value="" ${!x.settle?"selected":""}>—</option>
+        <option value="pending" ${x.settle==="pending"?"selected":""}>authorized, not settled</option>
+        <option value="settled" ${x.settle&&x.settle!=="pending"?"selected":""}>settled${x.settle&&x.settle!=="pending"?" "+prettyShort(x.settle):""}</option>
+      </select>
+    </label>`:""}
   </div>` : "";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${dueMark(x, todayISO())}</div>
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.checked&&x.settle==="pending"?'<span class="mark" style="color:var(--muted)">not settled</span>':""}${dueMark(x, todayISO())}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
+}
+
+// Pending entries stay on top; done ones fold away behind one quiet line.
+function stackedRows(items, key){
+  const pending = items.filter(x => !x.checked);
+  const done = items.filter(x => x.checked);
+  let html = pending.map(rowHTML).join("");
+  if (done.length) {
+    const net = done.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+    html += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key] ? "true" : "false"}">${done.length} done · ${fmt(net)}<span class="tinylink">${showDone[key] ? "hide" : "show"}</span></button>`;
+    if (showDone[key]) html += done.map(rowHTML).join("");
+  }
+  return html;
 }
 
 function listHTML(kind, items){
@@ -395,7 +425,7 @@ function listHTML(kind, items){
   return `<div>
     <div class="lh"><div class="sw" style="background:${isIn?"var(--in)":"var(--out)"}"></div><div class="lt">${isIn?"Coming in":"Going out"}</div></div>
     <div class="hint">${isIn?"Check it when the money lands":"Check it when you pay it"}</div>
-    ${items.length?items.map(rowHTML).join(""):'<div class="empty">Nothing on this day.</div>'}
+    ${items.length?stackedRows(items, kind):'<div class="empty">Nothing on this day.</div>'}
     <div class="addrow">
       <div class="addgrid">
         <input data-f="name" data-k="${kind}" list="vendorNames" value="${esc(d.name)}" placeholder="${isIn?"Shopify payout":"Meta ads"}" aria-label="Name" autocomplete="off">
@@ -618,14 +648,26 @@ function renderMain(){
       ? `<div style="display:flex;gap:6px;align-items:center"><input id="startDraft" type="number" step="0.01" value="${s.startBudget.toFixed(2)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Starting balance"><button class="btn" id="saveStart" style="padding:6px 10px;font-size:12px">Save</button></div>`
       : `<button class="bare num big" id="editStart">${fmt(s.startBudget)}<span class="tinylink">edit</span></button>`;
   } else {
-    startCell = `<div class="big num">${fmt(m.carry)}</div><div class="sub">carried from before</div>`;
+    const a = (s.adjust || {})[date] || 0;
+    startCell = editCarry
+      ? `<div style="display:flex;gap:6px;align-items:center"><input id="carryDraft" type="number" step="0.01" value="${round2(m.carry).toFixed(2)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Start of day"><button class="btn" id="saveCarry" style="padding:6px 10px;font-size:12px">Save</button></div>`
+      : `<button class="bare num big" id="editCarry">${fmt(m.carry)}<span class="tinylink">edit</span></button>
+         <div class="sub">${a ? `adjusted ${fmt(a)}<button class="link" id="clearAdj">clear</button>` : "carried from before"}</div>`;
   }
   const endColor = m.end<0 ? "var(--out)" : "var(--in)";
   const endFill = m.end<0 ? "var(--outSoft)" : "var(--inSoft)";
 
   let body;
   if (view==="day") {
-    body = `<div class="cols">${listHTML("in", m.inT)}${listHTML("out", m.outT)}</div>`;
+    const isProc = x => { const v = x.vendorId && s.vendors.find(z=>z.id===x.vendorId); return !!(v && v.isProcessor); };
+    const procT = [...m.inT, ...m.outT].filter(isProc).sort((a,b)=>a.kind===b.kind?0:a.kind==="in"?-1:1);
+    const inO = m.inT.filter(x=>!isProc(x)), outO = m.outT.filter(x=>!isProc(x));
+    const procBlock = procT.length ? `<div class="procblock">
+      <div class="lh"><div class="sw" style="background:var(--muted)"></div><div class="lt">Processors</div></div>
+      <div class="hint">Payouts, fees, reserves — check them when they hit</div>
+      ${stackedRows(procT, "proc")}
+    </div>` : "";
+    body = `<div class="cols">${listHTML("in", inO)}${listHTML("out", outO)}</div>${procBlock}`;
   } else if (view==="month") {
     body = monthHTML();
   } else {
@@ -706,6 +748,12 @@ function renderVendor(){
       ${v.cadence==="monthly"?`<span>on day</span><input id="vDay" type="number" min="1" max="31" value="${v.dayOfMonth??""}" aria-label="Day of month" style="width:64px">`:""}
       ${v.cadence?`<span class="sub" style="margin:0">Bills appear unchecked on their day. Delete one to skip it.</span>`:""}
     </div>
+    <div class="cadrow">
+      <label class="sub" style="margin:0;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="vProc" ${v.isProcessor?"checked":""} style="width:15px;height:15px">
+        Payment processor — its entries get their own section on the day
+      </label>
+    </div>
     ${s.accounts.length?`<div class="cadrow num">
       <span>Account</span>
       <select id="vAccount" aria-label="Default account">
@@ -732,6 +780,7 @@ function renderVendor(){
     }
     save(); render();
   };
+  document.getElementById("vProc").onchange = e=>{ v.isProcessor = e.target.checked; save(); render(); };
   const vAcc = document.getElementById("vAccount");
   if (vAcc) vAcc.onchange = e=>{
     v.defaultAccountId = e.target.value || null;
@@ -759,7 +808,7 @@ function renderVendors(){
     <div class="lt" style="font-size:20px;margin-bottom:14px">Vendors</div>
     ${rows.length?rows.map(({v,st})=>`
       <div class="row" style="cursor:default">
-        <div class="name"><button class="namebtn" data-vopen="${v.id}">${esc(v.name)}</button></div>
+        <div class="name"><button class="namebtn" data-vopen="${v.id}">${esc(v.name)}</button>${v.isProcessor?'<span class="tinytag">processor</span>':""}</div>
         <div class="sub num" style="margin:0">${st.count} ${st.count===1?"entry":"entries"} · ${fmt(st.doneAll)} · ${st.last?prettyShort(st.last):"—"}</div>
       </div>`).join(""):'<div class="empty">No vendors yet. They appear as you log entries.</div>'}
   `;
@@ -818,6 +867,13 @@ function bindShared(){
       save(); render();
     };
   });
+  app.querySelectorAll("[data-settle]").forEach(sel=>{
+    sel.onchange = ()=>{
+      const x = s.items.find(i=>i.id===sel.dataset.settle);
+      x.settle = sel.value === "settled" ? todayISO() : (sel.value || null);
+      save(); render();
+    };
+  });
   app.querySelectorAll("[data-note]").forEach(el=>{
     el.oninput = ()=>{ const x=s.items.find(i=>i.id===el.dataset.note); x.note = el.value; save(); };
     el.onkeydown = e=>{ if(e.key==="Escape"||e.key==="Enter"){ expandedId=null; render(); } };
@@ -826,7 +882,7 @@ function bindShared(){
     el.onchange = ()=>{ const x=s.items.find(i=>i.id===el.dataset.receipt); x.receiptUrl = el.value.trim(); save(); };
     el.onkeydown = e=>{ if(e.key==="Escape"||e.key==="Enter"){ const x=s.items.find(i=>i.id===el.dataset.receipt); x.receiptUrl = el.value.trim(); expandedId=null; save(); render(); } };
   });
-  app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ date=b.dataset.open; view="day"; save(); render(); });
+  app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ date=b.dataset.open; view="day"; editCarry=false; showDone={in:false,out:false,proc:false}; save(); render(); });
   app.querySelectorAll("[data-vopen-item]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
     const x = s.items.find(i=>i.id===b.dataset.vopenItem);
@@ -843,11 +899,12 @@ function bindMain(){
   const $ = id => document.getElementById(id);
   const app = $("app");
   bindShared();
+  const goto = d => { date=d; editCarry=false; showDone={in:false,out:false,proc:false}; save(); render(); };
   const step = view==="month" ? n=>addMonths(date, n) : n=>shift(date, n);
-  $("prev").onclick = ()=>{ date=step(-1); save(); render(); };
-  $("next").onclick = ()=>{ date=step(1); save(); render(); };
-  $("datePick").onchange = e=>{ if(e.target.value){ date=e.target.value; save(); render(); } };
-  if ($("today")) $("today").onclick = ()=>{ date=todayISO(); save(); render(); };
+  $("prev").onclick = ()=>goto(step(-1));
+  $("next").onclick = ()=>goto(step(1));
+  $("datePick").onchange = e=>{ if(e.target.value) goto(e.target.value); };
+  if ($("today")) $("today").onclick = ()=>goto(todayISO());
   app.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{ view=b.dataset.view; render(); });
   app.querySelectorAll("[data-f]").forEach(el=>{
     const k=el.dataset.k, f=el.dataset.f;
@@ -873,6 +930,21 @@ function bindMain(){
   });
   app.querySelectorAll("[data-add]").forEach(b=>b.onclick=()=>add(b.dataset.add));
   if ($("editStart")) $("editStart").onclick = ()=>{ editStart=true; render(); $("startDraft").focus(); };
+  if ($("editCarry")) $("editCarry").onclick = ()=>{ editCarry=true; render(); $("carryDraft").focus(); };
+  if ($("saveCarry")) { const doSave=()=>{
+      const v=parseFloat($("carryDraft").value); editCarry=false;
+      if(!isNaN(v)){
+        s.adjust = s.adjust || {};
+        const cur = calc(s, date).carry;
+        const next = ((s.adjust[date]||0) + (v - cur));
+        if (Math.abs(next) < 0.005) delete s.adjust[date]; else s.adjust[date] = next;
+      }
+      save(); render(); };
+    $("saveCarry").onclick=doSave;
+    $("carryDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editCarry=false; render(); } };
+  }
+  if ($("clearAdj")) $("clearAdj").onclick = ()=>{ delete s.adjust[date]; save(); render(); };
+  app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{ const k=b.dataset.donetoggle; showDone[k]=!showDone[k]; render(); });
   if ($("saveStart")) { const doSave=()=>{ const v=parseFloat($("startDraft").value); editStart=false; if(!isNaN(v)){ s.startBudget=v; s.startDate=date; } save(); render(); };
     $("saveStart").onclick=doSave; $("startDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editStart=false; render(); } }; }
   $("rateToggle").onclick = ()=>{ showRate=!showRate; render(); };
@@ -923,8 +995,8 @@ if (typeof window === "undefined") {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
     if (e.key === "Escape") {
-      if (deleteAsk || expandedId || editStart || editAccId || pendingImport) {
-        deleteAsk = null; expandedId = null; editStart = false; editAccId = null; pendingImport = null;
+      if (deleteAsk || expandedId || editStart || editCarry || editAccId || pendingImport) {
+        deleteAsk = null; expandedId = null; editStart = false; editCarry = false; editAccId = null; pendingImport = null;
         if (typing) document.activeElement.blur();
         render();
       } else if (typing) document.activeElement.blur();

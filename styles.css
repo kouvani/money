@@ -65,6 +65,8 @@ button{cursor:pointer}
 .cadrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 6px;font-size:12.5px;color:var(--muted)}
 .cadrow select,.cadrow input{width:auto;padding:6px 8px;font-size:12.5px}
 .askrow{cursor:default}
+.donebar{display:block;width:100%;background:none;border:none;border-top:1px solid var(--line);text-align:left;padding:11px 0 11px 30px;font-size:12px;color:var(--muted);cursor:pointer}
+.procblock{margin-top:36px;padding-top:4px}
 .detail{display:flex;align-items:center;gap:10px;padding:2px 0 12px 30px;flex-wrap:wrap}
 .notetxt{font-size:11px;color:var(--muted);margin-left:7px;font-weight:400;overflow:hidden;text-overflow:ellipsis;max-width:16ch;display:inline-block;vertical-align:bottom;white-space:nowrap}
 .mgrid{display:grid;grid-template-columns:repeat(7,1fr);border-left:1px solid var(--line);border-top:1px solid var(--line)}
