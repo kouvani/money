@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -145,6 +145,22 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("end-of-day figures run through the month", Math.round(d15.end*100)/100 === 10403.01 && Math.round(d31.end*100)/100 === 8858.01);
   assert("past days with unchecked entries are marked", d31.warn === true && d15.warn === false);
   assert("august 2026 starts on a saturday", md.offset === 6 && md.days.length === 31);
+}
+
+// 9. Runway: trailing 30-day net of checked entries, days of cash at that pace
+{
+  const st = structuredClone(SEED);
+  st.startBudget = 9000; st.items = [];
+  const mk = (id, kind, dt, usd, checked) => ({ id, kind, date: dt, name: id, usd, cadFixed: null, checked, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push(mk("w1", "out", "2026-08-20", 2000, true));   // in window
+  st.items.push(mk("w2", "in",  "2026-08-25", 500,  true));   // in window
+  st.items.push(mk("w3", "out", "2026-07-01", 5000, true));   // outside window, still burns cash total
+  st.items.push(mk("w4", "out", "2026-08-28", 9999, false));  // unchecked: ignored
+  const r = runwayInfo(st, "2026-09-01");
+  // cash = 9000 - 2000 + 500 - 5000 = 2500; burn = 1500/30 = 50/day -> 50 days
+  assert("runway counts only checked entries in the last 30 days", r.burning && r.days === 50);
+  st.items.push(mk("w5", "in", "2026-08-30", 2000, true));
+  assert("positive 30-day net means no burn", runwayInfo(st, "2026-09-01").burning === false);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

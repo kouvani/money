@@ -32,6 +32,9 @@ button{cursor:pointer}
 .cell .big{font-size:22px;font-weight:600}
 .cell .huge{font-size:34px;font-weight:700;letter-spacing:-.03em;line-height:1.05}
 .sub{font-size:12px;color:var(--muted);margin-top:3px}
+.runway{margin-top:10px;font-size:12.5px;color:var(--muted)}
+.runway.low{color:var(--out)}
+.mark{font-size:10.5px;color:var(--out);margin-left:7px;font-weight:500;white-space:nowrap}
 .summary{margin-top:12px;font-size:13px;color:var(--muted);display:flex;gap:18px;flex-wrap:wrap}
 .summary b{color:var(--ink)}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:36px;margin-top:36px}

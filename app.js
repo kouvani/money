@@ -223,6 +223,29 @@ function vendorStats(st, v, today){
   };
 }
 
+// ---- runway ----
+
+const dayDiff = (a, b) => Math.round((new Date(b + "T00:00") - new Date(a + "T00:00")) / 86400000);
+
+// Trailing 30-day net of checked entries; days of cash left at that pace.
+function runwayInfo(st, today){
+  const from = shift(today, -30);
+  const win = st.items.filter(x => x.checked && x.date > from && x.date <= today);
+  const net = win.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+  const cash = st.startBudget + st.items.filter(x => x.checked).reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
+  if (net >= 0) return { burning: false, days: null };
+  const perDay = -net / 30;
+  return { burning: true, days: Math.max(0, Math.floor(cash / perDay)) };
+}
+
+function dueMark(x, today){
+  if (x.checked) return "";
+  if (x.date < today) return '<span class="mark">overdue</span>';
+  const d = dayDiff(today, x.date);
+  if (d > (s?.settings?.warnDaysAhead ?? 3)) return "";
+  return `<span class="mark">${d === 0 ? "due today" : d === 1 ? "due tomorrow" : `due in ${d} days`}</span>`;
+}
+
 // ---- month ----
 
 function monthData(st, ym, today){
@@ -300,7 +323,7 @@ function rowHTML(x){
   </div>` : "";
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}</div>
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${dueMark(x, todayISO())}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
@@ -450,6 +473,10 @@ function renderMain(){
       <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)">−${fmt(m.outC,"")}</div>${m.outA>m.outC?`<div class="sub">of ${fmt(m.outA,"")} owed</div>`:""}</div></div>
       <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}">${fmt(m.end)}</div><div class="sub">${fmt(m.end*s.rate,"C$")}</div></div></div>
     </div>
+    ${view==="day"?(()=>{ const r = runwayInfo(s, todayISO());
+      return r.burning
+        ? `<div class="runway num${r.days<30?" low":""}">Cash lasts ${r.days} ${r.days===1?"day":"days"} at this month's pace.</div>`
+        : `<div class="runway num">At this month's pace, cash is growing.</div>`; })():""}
     <div class="summary num">
       <span>All days so far: <b>${fmt(m.allTime)}</b></span>
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmt(m.ifAll)}</b></span>
@@ -682,7 +709,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo };
 } else {
   s = load();
   date = s.lastDate || todayISO();
