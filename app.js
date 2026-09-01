@@ -1099,17 +1099,41 @@ function rowHTML(x){
   </label>${detail}`;
 }
 
+// Two or more entries from the same merchant in one list collapse into a single
+// row with the count and total; a group with something unchecked opens itself.
+function groupItems(items){
+  const groups = new Map();
+  for (const x of items) { const k = x.vendorId || x.name.trim().toLowerCase(); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
+  return [...groups.entries()].map(([k, list]) => ({ key: k, list }));
+}
+function groupRows(items, listKey){
+  return groupItems(items).map(({ key, list }) => {
+    if (list.length < 2) return rowHTML(list[0]);
+    const gk = "g:" + listKey + ":" + key;
+    const pend = list.filter(x => !x.checked && !x.declined).length;
+    const open = showDone[gk] !== undefined ? showDone[gk] : pend > 0;
+    const total = list.reduce((t, x) => t + x.usd, 0);
+    const kind = list[0].kind, color = kind === "in" ? "var(--in)" : "var(--out)";
+    return `<div class="row grouprow" role="button" tabindex="0" data-donetoggle="${gk}" data-cur="${open?1:0}" aria-expanded="${open?"true":"false"}">
+      <span class="gbadge">${list.length}</span>
+      <div class="name">${esc(list[0].name)}<span class="notetxt">${list.length} × same merchant${pend?` · ${pend} unchecked`:""}</span></div>
+      <div class="amt num"><div class="u" style="color:${color}">${kind==="in"?"+":"−"}${fmtPbare(total)}</div><div class="c">${fmtSec(total)}</div></div>
+      <svg class="pchev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 2.5L8 6l-3.8 3.5"/></svg>
+    </div>${open ? `<div class="gsub">${list.map(rowHTML).join("")}</div>` : ""}`;
+  }).join("");
+}
+
 // Pending entries stay on top; done ones can fold away behind one quiet line.
 // Payouts and processor activity never fold — seeing them is the point.
 function stackedRows(items, key, fold){
-  if (!fold) return items.map(rowHTML).join(""); // exact user order, nothing hidden
+  if (!fold) return groupRows(items, key); // nothing hidden, repeats grouped
   const pending = items.filter(x => !x.checked);
   const done = items.filter(x => x.checked);
-  let html = pending.map(rowHTML).join("");
+  let html = groupRows(pending, key + "p");
   if (done.length) {
     const net = done.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
     html += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key] ? "true" : "false"}">${done.length} done · ${fmtP(net)}<span class="tinylink">${showDone[key] ? "hide" : "show"}</span></button>`;
-    if (showDone[key]) html += done.map(rowHTML).join("");
+    if (showDone[key]) html += groupRows(done, key + "d");
   }
   return html;
 }
@@ -1151,6 +1175,18 @@ function ledgerRows(st){
 
 let allMode = "days";
 let ledgerFilter = "all";
+let ledgerGroup = true;
+// consecutive rows from the same merchant with the same state become one line
+function ledgerCompress(rows){
+  const out = [];
+  for (const r of rows) {
+    const last = out[out.length - 1];
+    const same = last && last.x.name.toLowerCase() === r.x.name.toLowerCase() && last.x.kind === r.x.kind && !!last.x.declined === !!r.x.declined && last.x.checked === r.x.checked;
+    if (same) { last.n++; last.total += r.x.usd; }
+    else out.push({ x: r.x, bal: r.bal, n: 1, total: r.x.usd });
+  }
+  return out;
+}
 function ledgerPass(st, x, f){
   const isProc = () => { const v = x.vendorId && st.vendors.find(z => z.id === x.vendorId); return !!(v && v.isProcessor); };
   switch (f) {
@@ -1167,21 +1203,23 @@ function ledgerHTML(){
   const rows = all.filter(r => ledgerPass(s, r.x, ledgerFilter) && matchesSearch(s, r.x, searchQ));
   const count = f => all.filter(r => ledgerPass(s, r.x, f)).length;
   const chips = [["all","All"],["proc","Processors"],["cards","Cards"],["fees","Fees"],["pending","Pending"],["declined","Declined"]]
-    .map(([k,l]) => `<button class="chip${ledgerFilter===k?" on":""}" data-lfilter="${k}"><span class="dot${k==="declined"?" warn":k==="proc"?" good":""}"></span>${l} <b>${count(k)}</b></button>`).join("");
+    .map(([k,l]) => `<button class="chip${ledgerFilter===k?" on":""}" data-lfilter="${k}"><span class="dot${k==="declined"?" warn":k==="proc"?" good":""}"></span>${l} <b>${count(k)}</b></button>`).join("")
+    + `<button class="chip${ledgerGroup?" on":""}" id="lgroup" title="Collapse runs of the same merchant"><span class="dot"></span>Group repeats</button>`;
   const head = `<div class="chips" style="margin:0 0 12px">${chips}</div>`;
   if (!rows.length) return head + '<div style="color:var(--muted)">Nothing matches.</div>';
-  const shown = rows.slice(0, 400);
+  const compact = ledgerGroup ? ledgerCompress(rows) : rows.map(r => ({ ...r, n: 1, total: r.x.usd }));
+  const shown = compact.slice(0, 400);
   const status = x => x.declined ? "declined" : x.checked ? (x.settle === "pending" ? "held" : x.settle ? "settled" : "done") : (x.settle === "pending" ? "authorized" : "expected");
   return head + `<div class="ledgerwrap"><table class="ledger num">
     <thead><tr><th>Date</th><th>What</th><th>Status</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th></tr></thead>
-    <tbody>${shown.map(({ x, bal }) => `<tr class="${x.declined ? "decl" : x.checked ? "" : "pend"}">
+    <tbody>${shown.map(({ x, bal, n, total }) => `<tr class="${x.declined ? "decl" : x.checked ? "" : "pend"}">
       <td>${prettyShort(x.date)}</td>
-      <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${x.cadFixed != null ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
+      <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${n > 1 ? `<span class="gbadge" style="margin-left:7px">×${n}</span>` : ""}${x.cadFixed != null && n === 1 ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
       <td class="sub" style="margin:0">${status(x)}</td>
-      <td style="text-align:right;color:${x.kind === "in" ? "var(--in)" : "var(--out)"};font-weight:600">${x.kind === "in" ? "+" : "−"}${fmtPbare(x.usd)}</td>
+      <td style="text-align:right;color:${x.kind === "in" ? "var(--in)" : "var(--out)"};font-weight:600">${x.kind === "in" ? "+" : "−"}${fmtPbare(total)}</td>
       <td style="text-align:right;color:${bal == null ? "var(--muted)" : bal < 0 ? "var(--out)" : "var(--ink)"}">${bal == null ? "—" : fmtPbare(bal)}</td>
     </tr>`).join("")}</tbody></table></div>
-    ${rows.length > shown.length ? `<div class="sub" style="margin-top:8px">Showing the latest ${shown.length} of ${rows.length} — search to narrow.</div>` : ""}`;
+    ${compact.length > shown.length ? `<div class="sub" style="margin-top:8px">Showing the latest ${shown.length} of ${compact.length} — search to narrow.</div>` : ""}`;
 }
 
 function allListHTML(){
@@ -1195,7 +1233,7 @@ function allListHTML(){
 function groupedItemsHTML(list){
   const dates = [...new Set(list.map(x=>x.date))].sort().reverse();
   return dates.map(d=>`<div class="grp"><button class="bare" style="font-size:14px;font-weight:600;margin-bottom:2px" data-open="${d}">${pretty(d)}<span class="tinylink">open</span></button>
-    ${list.filter(x=>x.date===d).map(rowHTML).join("")}</div>`).join("");
+    ${groupRows(list.filter(x=>x.date===d), "d" + d)}</div>`).join("");
 }
 
 // ---- views ----
@@ -1664,7 +1702,7 @@ function renderMain(){
             <span class="plabel">${label} · ${list.length}${pend?` · ${pend} pending`:""}</span>
             <span class="pamt" style="color:${kind==="in"?"var(--in)":"var(--out)"}">${kind==="in"?"+":"−"}${fmtPbare(total)}</span>
             <svg class="pchev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 2.5L8 6l-3.8 3.5"/></svg>
-          </button>${open ? list.map(rowHTML).join("") : ""}`;
+          </button>${open ? groupRows(list, k2) : ""}`;
         }).join("");
         if (!rowsHtml) rowsHtml = '<div class="empty">Nothing today.</div>';
         return `<div class="pcard">
@@ -2060,6 +2098,7 @@ function bindMain(){
     $("carryDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editCarry=false; render(); } };
   }
   if ($("clearAdj")) $("clearAdj").onclick = ()=>{ delete s.adjust[date]; save(); render(); };
+  app.querySelectorAll(".grouprow").forEach(g=>g.onkeydown=e=>{ if (e.key==="Enter"||e.key===" ") { e.preventDefault(); g.click(); } });
   app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{
     const k=b.dataset.donetoggle;
     showDone[k] = b.dataset.cur != null ? b.dataset.cur !== "1" : !showDone[k];
@@ -2111,6 +2150,7 @@ function bindMain(){
   app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ view=b.dataset.nav; render(); });
   app.querySelectorAll("[data-allmode]").forEach(b=>b.onclick=()=>{ allMode=b.dataset.allmode; render(); });
   app.querySelectorAll("[data-lfilter]").forEach(b=>b.onclick=()=>{ ledgerFilter=b.dataset.lfilter; render(); });
+  const lg = document.getElementById("lgroup"); if (lg) lg.onclick = ()=>{ ledgerGroup = !ledgerGroup; render(); };
 }
 
 function add(kind){
@@ -2134,7 +2174,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress };
 } else {
   s = load();
   date = s.lastDate || todayISO();

@@ -252,3 +252,20 @@ button.chip:hover{transform:translateY(-1px);background:var(--surface)}
 .declbox{margin-top:22px}
 .ledger tr.decl td{opacity:.5;text-decoration:line-through}
 .ledger tr.decl td:last-child{text-decoration:none}
+/* grouping */
+.grouprow{cursor:pointer}
+.gbadge{min-width:22px;height:22px;padding:0 6px;border-radius:6px;background:var(--surface);border:1px solid var(--line);font-size:11px;font-weight:600;display:inline-grid;place-items:center;flex-shrink:0;color:var(--muted)}
+.grouprow .pchev{margin-left:2px}
+.gsub{margin-left:9px;padding-left:12px;border-left:2px solid var(--line);animation:fadeDown .2s ease}
+.gsub .row{padding-left:4px}
+/* animation pass */
+.row{transition:background .15s ease,opacity .2s ease,transform .15s ease}
+.row:hover{transform:translateX(2px)}
+#app.viewfade .flow{animation:fadeUp .38s ease both}
+#app.viewfade .chips{animation:fadeUp .38s ease both;animation-delay:.06s}
+#app.viewfade .psec{animation:fadeUp .4s ease both;animation-delay:.1s}
+#app.viewfade .cols{animation:fadeUp .42s ease both;animation-delay:.14s}
+#app.viewfade .pulsecard{animation:fadeUp .45s ease both;animation-delay:.2s}
+#app.viewfade .navbar{animation:fadeUp .45s ease both;animation-delay:.24s}
+.chip{transition:transform .15s ease,background .15s ease,box-shadow .2s ease}
+button.chip:active{transform:scale(.97)}

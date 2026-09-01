@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -546,6 +546,25 @@ const round2 = n => Math.round(n * 100) / 100;
   const out = rebuildFromRecords(st2, recs, 4504.46, "2026-09-01");
   assert("rebuild replaces everything and starts at the first transaction", st2.items.length === 2 && st2.startDate === "2026-08-20" && st2.startBudget === 0 && Object.keys(st2.adjust).length === 1);
   assert("after rebuild today's Left equals Slash", Math.round(calc(st2, "2026-09-01").end*100)/100 === 4504.46 && Math.round(out.matched*100)/100 === 504.46);
+}
+
+// 28. Repeats group: same merchant in a list, and consecutive runs in the ledger
+{
+  const mk = (id, name, usd, checked, vendorId) => ({ id, kind: "out", date: "2026-09-01", name, usd, cadFixed: null, checked, accountId: null, vendorId: vendorId || null, note: "", receiptUrl: "", recurringSourceId: null });
+  const items = [mk("a", "EMS", 30, true, "v1"), mk("b", "Uber", 42, true), mk("c", "EMS", 43.22, true, "v1"), mk("d", "uber", 37.3, false), mk("e", "Wise", 660, true)];
+  const g = groupItems(items);
+  assert("same merchant groups together, order of first appearance kept", g.map(x => x.list.length).join(",") === "2,2,1" && g[0].list[0].name === "EMS");
+  assert("grouping matches by vendor id or by name, case-insensitively", g[1].list.length === 2);
+  const rows = [
+    { x: mk("f1", "Foreign Transaction Fee", 0.8, true), bal: 100 },
+    { x: mk("f2", "Foreign Transaction Fee", 0.4, true), bal: 99 },
+    { x: mk("f3", "Foreign Transaction Fee", 2, true), bal: 98 },
+    { x: mk("u1", "Uber", 42, true), bal: 90 },
+    { x: mk("f4", "Foreign Transaction Fee", 0.8, false), bal: null },
+  ];
+  const c = ledgerCompress(rows);
+  assert("consecutive same-merchant rows compress into one line with a total", c.length === 3 && c[0].n === 3 && Math.round(c[0].total*100)/100 === 3.2 && c[0].bal === 100);
+  assert("a different state (unchecked) starts a new line", c[2].n === 1 && c[2].x.id === "f4");
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
