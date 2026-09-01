@@ -19,6 +19,11 @@ const shift = (iso, n) => { const [y,m,d] = iso.split("-").map(Number); const t 
 const pretty = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d).toLocaleDateString("en-US", { weekday:"short", month:"short", day:"numeric", year:"numeric" }); };
 const prettyShort = iso => { const [y,m,d] = iso.split("-").map(Number); return new Date(y, m-1, d).toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" }); };
 const fmt = (n, sym="US$") => (n<0?"−":"") + sym + Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+// Primary/secondary display currency. Amounts are stored in USD; this only changes what leads.
+const cadFirst = () => (typeof s !== "undefined" && s?.settings?.currencyDisplay) === "cad";
+const fmtP = usd => cadFirst() ? fmt(usd * s.rate, "C$") : fmt(usd);
+const fmtPbare = usd => cadFirst() ? fmt(usd * s.rate, "") : fmt(usd, "");
+const fmtSec = usd => cadFirst() ? fmt(usd) : fmt(usd * s.rate, "C$");
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const round2 = n => Math.round(n * 100) / 100;
 const uid = p => p + Math.random().toString(36).slice(2, 10);
@@ -49,18 +54,24 @@ function ensure(st){
   st.accounts = st.accounts || [];
   st.vendors = st.vendors || [];
   st.items = st.items || [];
-  st.settings = Object.assign({ theme: "system", currencyDisplay: "both", warnDaysAhead: 3 }, st.settings || {});
+  const hadRateMode = st.settings && st.settings.rateMode != null;
+  st.settings = Object.assign({ theme: "system", currencyDisplay: "usd", warnDaysAhead: 3, rateMode: "live", rateUpdatedAt: null }, st.settings || {});
+  if (st.settings.currencyDisplay !== "cad") st.settings.currencyDisplay = "usd";
+  // a rate the user set by hand before live rates existed stays theirs
+  if (!hadRateMode && typeof st.rate === "number" && Math.abs(st.rate - 1.389) > 1e-9) st.settings.rateMode = "manual";
   st.adjust = st.adjust || {};
   st.goals = st.goals || [];
   st.vendors.forEach(v => {
     v.note = v.note ?? ""; v.url = v.url ?? ""; v.cadence = v.cadence ?? null;
     v.dayOfMonth = v.dayOfMonth ?? null; v.defaultAccountId = v.defaultAccountId ?? null;
-    v.skipDates = v.skipDates ?? []; v.isProcessor = v.isProcessor ?? false;
+    v.skipDates = v.skipDates ?? []; v.isProcessor = v.isProcessor ?? false; v.dayLag = v.dayLag ?? 0;
   });
   st.items.forEach(x => {
     x.cadFixed = x.cadFixed ?? null; x.accountId = x.accountId ?? null; x.vendorId = x.vendorId ?? null;
     x.note = x.note ?? ""; x.receiptUrl = x.receiptUrl ?? ""; x.recurringSourceId = x.recurringSourceId ?? null;
     x.settle = x.settle ?? null; // null = untracked, "pending" = authorized not settled, ISO date = settled
+    x.createdAt = x.createdAt ?? null;
+    x.importId = x.importId ?? null;
   });
   const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
   st.accounts.forEach((a, i) => {
@@ -192,6 +203,14 @@ function findVendorByName(st, name){
 // remember the entry's amount/currency/direction/account as the new defaults.
 function upsertVendorFromEntry(st, item){
   let v = findVendorByName(st, item.name);
+  if (!v) {
+    // banks truncate long names ("PHOENIX ECOMMERC") — match a clear truncation, never short names
+    const n = item.name.trim().toLowerCase();
+    if (n.length >= 10) v = st.vendors.find(z => {
+      const zn = z.name.toLowerCase();
+      return zn.length >= 10 && (zn.startsWith(n) || n.startsWith(zn));
+    }) || null;
+  }
   if (!v) {
     v = { id: uid("v"), name: item.name.trim(), note: "", defaultKind: item.kind, defaultAccountId: item.accountId ?? null,
           defaultAmountUsd: item.usd, cadFixed: item.cadFixed, cadence: null, dayOfMonth: null, url: "", skipDates: [] };
@@ -392,7 +411,7 @@ function insightsFor(st, today){
   const expIn = week.filter(x => x.kind === "in").reduce((t, x) => t + x.usd, 0);
   if (owed > 0 || expIn > 0) {
     const proj = calc(st, today).allTime + expIn - owed;
-    out.push({ tone: proj < 0 ? "warn" : "info", text: `Next 7 days: ${fmt(owed)} owed${expIn > 0.004 ? `, ${fmt(expIn)} expected in` : ""} — projected Left ${fmt(proj)}.` });
+    out.push({ tone: proj < 0 ? "warn" : "info", text: `Next 7 days: ${fmtP(owed)} owed${expIn > 0.004 ? `, ${fmtP(expIn)} expected in` : ""} — projected Left ${fmtP(proj)}.` });
   }
   const ym = today.slice(0, 7), prevYm = addMonths(today, -1).slice(0, 7);
   const byVendor = new Map();
@@ -405,7 +424,7 @@ function insightsFor(st, today){
     byVendor.set(k, e);
   }
   const top = [...byVendor.values()].filter(e => e.cur > 0).sort((a, b) => b.cur - a.cur)[0];
-  if (top) out.push({ tone: "info", text: `Biggest cost this month: ${top.name} ${fmt(top.cur)}${top.prev > 0.004 ? ` (last month ${fmt(top.prev)})` : ""}.` });
+  if (top) out.push({ tone: "info", text: `Biggest cost this month: ${top.name} ${fmtP(top.cur)}${top.prev > 0.004 ? ` (last month ${fmtP(top.prev)})` : ""}.` });
   const isProcId = new Set(st.vendors.filter(v => v.isProcessor).map(v => v.id));
   const pin = st.items.filter(x => x.checked && x.kind === "in" && isProcId.has(x.vendorId) && x.date.slice(0, 7) === ym).reduce((t, x) => t + x.usd, 0);
   const pout = st.items.filter(x => x.checked && x.kind === "out" && isProcId.has(x.vendorId) && x.date.slice(0, 7) === ym).reduce((t, x) => t + x.usd, 0);
@@ -436,15 +455,31 @@ function paintNum(id, val, fmtFn){
 
 // Move an entry to the day the money actually moved (e.g. a card purchase
 // back to its authorization day). A moved generated bill doesn't come back.
-function redateItem(st, id, newDate){
+function redateItem(st, id, newDate, today){
   const x = st.items.find(i => i.id === id);
   if (!x || !newDate) return null;
   if (x.recurringSourceId) {
     const v = st.vendors.find(z => z.id === x.recurringSourceId);
     if (v && !(v.skipDates || []).includes(x.date)) (v.skipDates = v.skipDates || []).push(x.date);
   }
+  // learn the vendor's usual authorization lag — but only from correcting a
+  // freshly-logged entry, never from fixing an old typo
+  const back = dayDiff(newDate, x.date);
+  const freshCorrection = x.createdAt && x.createdAt === x.date && (!today || dayDiff(x.createdAt, today) <= 7);
+  if (!x.recurringSourceId && x.vendorId && freshCorrection && back >= 1 && back <= 3) {
+    const v = st.vendors.find(z => z.id === x.vendorId);
+    if (v) v.dayLag = back;
+  }
   x.date = newDate;
   return x;
+}
+
+// A fresh entry whose vendor usually authorizes earlier gets a one-tap suggestion.
+function lagSuggestion(st, x){
+  if (x.recurringSourceId || !x.vendorId || x.createdAt !== x.date) return null;
+  const v = st.vendors.find(z => z.id === x.vendorId);
+  if (!v || !(v.dayLag >= 1)) return null;
+  return shift(x.date, -v.dayLag);
 }
 
 // Checking an entry that was authorized-but-unsettled stamps the settled date.
@@ -487,6 +522,7 @@ function monthData(st, ym, today){
 }
 
 const fmtWhole = n => (n < 0 ? "−" : "") + Math.abs(Math.round(n)).toLocaleString("en-US");
+const fmtWholeP = usd => fmtWhole(cadFirst() ? usd * s.rate : usd);
 
 function monthHTML(){
   const ym = date.slice(0, 7);
@@ -497,9 +533,9 @@ function monthHTML(){
   return `<div style="margin-top:36px">
     <div class="lh"><div class="lt">${title}</div></div>
     <div class="summary num" style="margin-top:6px;margin-bottom:14px">
-      <span>In: <b style="color:var(--in)">+${fmt(md.inC, "")}</b></span>
-      <span>Out: <b style="color:var(--out)">−${fmt(md.outC, "")}</b></span>
-      <span>Net: <b style="color:${md.net < 0 ? "var(--out)" : "var(--ink)"}">${fmt(md.net)}</b></span>
+      <span>In: <b style="color:var(--in)">+${fmtPbare(md.inC)}</b></span>
+      <span>Out: <b style="color:var(--out)">−${fmtPbare(md.outC)}</b></span>
+      <span>Net: <b style="color:${md.net < 0 ? "var(--out)" : "var(--ink)"}">${fmtP(md.net)}</b></span>
     </div>
     <div class="mgrid num">
       ${["S","M","T","W","T","F","S"].map(w => `<div class="mwd">${w}</div>`).join("")}
@@ -508,7 +544,7 @@ function monthHTML(){
         <button class="mday${d.date === t ? " today" : ""}${d.warn ? " warn" : ""}" data-open="${d.date}" aria-label="${pretty(d.date)}${d.warn ? ", has unchecked entries" : ""}">
           <span class="d">${d.day}</span>
           <span class="mdots">${d.hasIn ? '<span class="mdot" style="background:var(--in)"></span>' : ""}${d.hasOut ? '<span class="mdot" style="background:var(--out)"></span>' : ""}</span>
-          <span class="mend">${fmtWhole(d.end)}</span>
+          <span class="mend">${fmtWholeP(d.end)}</span>
         </button>`).join("")}
     </div>
   </div>`;
@@ -542,6 +578,39 @@ function backupDue(st, today){
   return stale && !snoozed;
 }
 
+// Live USD->CAD rate. Sanity-checked; manual override always wins.
+function applyLiveRate(st, v, today){
+  if (typeof v !== "number" || !(v > 0.5 && v < 3)) return false;
+  const changed = Math.abs(st.rate - v) > 0.00005;
+  st.rate = v;
+  st.settings.rateUpdatedAt = today;
+  return changed;
+}
+
+async function refreshRate(){
+  if (!navigator.onLine || s.settings.rateMode === "manual") return;
+  const sources = [
+    ["https://open.er-api.com/v6/latest/USD", j => j?.rates?.CAD],
+    ["https://api.frankfurter.app/latest?from=USD&to=CAD", j => j?.rates?.CAD],
+  ];
+  for (const [url, pick] of sources) {
+    try {
+      const j = await fetch(url).then(x => x.json());
+      if (s.settings.rateMode === "manual") return; // the user took over while we were fetching
+      const v = pick(j);
+      if (typeof v === "number" && v > 0.5 && v < 3) {
+        const changed = applyLiveRate(s, v, todayISO());
+        save();
+        // never yank the page out from under an edit in progress
+        const tag = document.activeElement?.tagName || "";
+        const busy = /INPUT|SELECT|TEXTAREA/.test(tag) || editStart || editCarry || editAccId !== null || showRate || deleteAsk !== null || pendingImport !== null || pendingCsv !== null;
+        if (changed && !busy) render();
+        return;
+      }
+    } catch {}
+  }
+}
+
 function downloadText(filename, mime, text){
   const a = document.createElement("a");
   a.href = `data:${mime};charset=utf-8,` + encodeURIComponent(text);
@@ -556,16 +625,143 @@ function exportJson(){
   render();
 }
 
+// ---- bank import (Slash CSV) ----
+
+function parseCsv(text){
+  const rows = []; let row = [], field = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(field); field = ""; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i+1] === '\n') i++;
+      row.push(field); field = "";
+      if (row.length > 1 || row[0] !== "") rows.push(row);
+      row = [];
+    }
+    else field += c;
+  }
+  row.push(field);
+  if (row.length > 1 || row[0] !== "") rows.push(row);
+  return rows;
+}
+
+// "2026-08-30 02:07:42AM" (UTC) -> the date it was in this machine's timezone
+function utcToLocalISO(sUtc){
+  const m = String(sUtc || "").trim().match(/^(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2}):(\d{2})(AM|PM)$/i);
+  if (!m) return null;
+  let h = Number(m[4]) % 12; if (/pm/i.test(m[7])) h += 12;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], h, +m[5], +m[6]));
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// "ACH debit from EMS" -> "EMS", "SHOPIFY* 58195" -> "SHOPIFY", "SUSHI SHOP - 2250" -> "SUSHI SHOP"
+function cleanBankName(desc){
+  const n = String(desc).trim()
+    .replace(/^incoming ach (credit|debit) from /i, "")
+    .replace(/^ach (credit|debit) from /i, "")
+    .replace(/\*\s*\S*$/, "")
+    .replace(/\s+#\d+$/, "")
+    .replace(/\s+-\s+\d+$/, "")
+    .trim();
+  return n || String(desc).trim();
+}
+
+// Turn a Slash transactions export into a plan: adds, pending-completions, skips.
+function mapSlashCsv(st, text){
+  const rows = parseCsv(text);
+  if (!rows.length) return null;
+  const head = rows[0].map(h => h.trim().toLowerCase());
+  const col = n => head.indexOf(n);
+  const ci = { id: col("id"), date: col("date (utc)"), desc: col("description"), amt: col("amount"),
+    famt: col("foreign amount"), fcur: col("foreign currency"), type: col("type"), last4: col("last 4"),
+    auth: col("authorization date (utc)"), status: col("status"), decline: col("decline reason") };
+  if (ci.id < 0 || ci.date < 0 || ci.amt < 0 || ci.desc < 0) return null;
+  let recs = rows.slice(1).map(r => ({
+    id: r[ci.id], desc: r[ci.desc], amt: parseFloat(r[ci.amt]),
+    famt: ci.famt >= 0 ? parseFloat(r[ci.famt]) : NaN, fcur: ci.fcur >= 0 ? (r[ci.fcur] || "").toUpperCase() : "",
+    type: ci.type >= 0 ? (r[ci.type] || "").toLowerCase() : "", last4: ci.last4 >= 0 ? (r[ci.last4] || "") : "",
+    dateLocal: utcToLocalISO(r[ci.date]), authLocal: ci.auth >= 0 ? utcToLocalISO(r[ci.auth]) : null,
+    status: ci.status >= 0 ? (r[ci.status] || "").toLowerCase() : "settled", decline: ci.decline >= 0 ? (r[ci.decline] || "") : "",
+  })).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0 && !x.decline && x.status !== "declined");
+  // opposite rows of the same amount from the same counterparty cancel out
+  let pairs = 0;
+  const dropped = new Set();
+  for (const a of recs) {
+    if (dropped.has(a.id)) continue;
+    const mate = recs.find(b => !dropped.has(b.id) && b.id !== a.id
+      && cleanBankName(b.desc).toLowerCase() === cleanBankName(a.desc).toLowerCase()
+      && Math.abs(b.amt + a.amt) < 0.005 && Math.sign(b.amt) !== Math.sign(a.amt)
+      && Math.abs(dayDiff(a.dateLocal, b.dateLocal)) <= 3);
+    if (mate) { dropped.add(a.id); dropped.add(mate.id); pairs++; }
+  }
+  recs = recs.filter(x => !dropped.has(x.id));
+  // a card hold superseded by its settlement in the same file
+  let authSkips = 0;
+  recs = recs.filter(x => {
+    if (x.type !== "card_authorization") return true;
+    const hit = recs.some(b => b.type === "card_settlement" && b.last4 === x.last4 && Math.abs(b.amt - x.amt) < 0.005);
+    if (hit) authSkips++;
+    return !hit;
+  });
+  const adds = [], updates = []; let dupes = 0;
+  for (const x of [...recs].reverse()) { // the export is newest-first; add oldest-first
+    if (st.items.some(i => i.importId === x.id) || updates.some(u => u.importId === x.id)) { dupes++; continue; }
+    const name = cleanBankName(x.desc);
+    const kind = x.amt > 0 ? "in" : "out";
+    const usd = Math.abs(x.amt);
+    const isCard = x.type.startsWith("card");
+    const entryDate = isCard ? (x.authLocal || x.dateLocal) : x.dateLocal;
+    const settled = x.status === "settled";
+    if (settled) {
+      const pend = st.items.find(i => i.settle === "pending" && i.importId !== x.id
+        && i.name.toLowerCase() === name.toLowerCase() && Math.abs(i.usd - usd) < 0.01
+        && Math.abs(dayDiff(i.date, entryDate)) <= 4
+        && !updates.some(u => u.id === i.id));
+      if (pend) { updates.push({ id: pend.id, settle: x.dateLocal, importId: x.id }); continue; }
+    }
+    if (st.items.some(i => !i.importId && i.date === entryDate && Math.abs(i.usd - usd) < 0.01 && i.name.toLowerCase() === name.toLowerCase())) { dupes++; continue; }
+    adds.push({
+      id: uid("m"), kind, date: entryDate, name, usd,
+      cadFixed: x.fcur === "CAD" && x.famt > 0 ? x.famt : null,
+      // settled = real; a pending debit is already held from the balance; a pending credit isn't yours yet
+      checked: settled ? true : kind === "out",
+      accountId: null, vendorId: null, note: "", receiptUrl: "",
+      recurringSourceId: null, settle: settled ? x.dateLocal : "pending",
+      createdAt: entryDate, importId: x.id,
+    });
+  }
+  return { adds, updates, dupes, pairs, authSkips };
+}
+
+function applySlashImport(st, plan){
+  for (const u of plan.updates) {
+    const i = st.items.find(z => z.id === u.id);
+    if (i) { i.settle = u.settle; i.importId = u.importId; i.checked = true; }
+  }
+  for (const a of plan.adds) {
+    const v = upsertVendorFromEntry(st, a);
+    a.accountId = v.defaultAccountId ?? null;
+    st.items.push(a);
+  }
+  return st;
+}
+
 // ---- search ----
 
 function matchesSearch(st, x, q){
   q = String(q).trim().toLowerCase();
   if (!q) return true;
   const vendor = x.vendorId ? st.vendors.find(v => v.id === x.vendorId) : null;
+  const cad = x.cadFixed != null ? x.cadFixed : x.usd * (st.rate || 1);
   const hay = [
     x.name, x.note, vendor ? vendor.name : "",
     round2(x.usd).toFixed(2), String(round2(x.usd)),
-    x.cadFixed != null ? round2(x.cadFixed).toFixed(2) : "",
+    round2(cad).toFixed(2), String(round2(cad)),
   ].join("\n").toLowerCase();
   return hay.includes(q);
 }
@@ -586,7 +782,10 @@ function rowHTML(x){
   }
   const color = x.kind==="in" ? "var(--in)" : "var(--out)";
   const sign = x.kind==="in" ? "+" : "−";
-  const cad = x.cadFixed!=null ? x.cadFixed : x.usd*s.rate;
+  const cadVal = x.cadFixed!=null ? x.cadFixed : x.usd*s.rate;
+  const mainAmt = cadFirst() ? fmt(cadVal,"") : fmt(x.usd,"");
+  const subAmt = cadFirst() ? fmt(x.usd) : fmt(cadVal,"C$");
+  const lag = lagSuggestion(s, x);
   const detail = expandedId === x.id ? `<div class="detail">
     ${s.accounts.length?`<label class="sub" style="margin:0">Account
       <select data-acc="${x.id}" aria-label="Account for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
@@ -598,6 +797,7 @@ function rowHTML(x){
     <input data-receipt="${x.id}" value="${esc(x.receiptUrl)}" placeholder="Receipt link" aria-label="Receipt link for ${esc(x.name)}" style="flex:1;min-width:130px;padding:5px 8px;font-size:12.5px">
     <label class="sub" style="margin:0">Day
       <input type="date" data-redate="${x.id}" value="${x.date}" aria-label="Day for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px;font-weight:400">
+      <button class="link" data-yesterday="${x.id}" style="margin-left:6px">yesterday</button>
     </label>
     <label class="sub" style="margin:0">Settlement
       <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
@@ -612,8 +812,8 @@ function rowHTML(x){
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <span class="drag" draggable="true" data-drag="${x.id}" title="Drag to reorder"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg></span>
     <input type="checkbox" ${x.checked?"checked":""} ${authorized?'data-ind="1"':""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":authorized?"authorized, waiting to settle — check when it settles":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${dueMark(x, todayISO())}</div>
-    <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${dueMark(x, todayISO())}${lag?`<button class="lagchip" data-lag="${x.id}" title="This vendor usually authorizes earlier — move it there">${dayDiff(lag, x.date)===1?"yesterday?":prettyShort(lag)+"?"}</button>`:""}</div>
+    <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${mainAmt}</div><div class="c">${subAmt}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
 }
@@ -627,7 +827,7 @@ function stackedRows(items, key, fold){
   let html = pending.map(rowHTML).join("");
   if (done.length) {
     const net = done.reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
-    html += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key] ? "true" : "false"}">${done.length} done · ${fmt(net)}<span class="tinylink">${showDone[key] ? "hide" : "show"}</span></button>`;
+    html += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key] ? "true" : "false"}">${done.length} done · ${fmtP(net)}<span class="tinylink">${showDone[key] ? "hide" : "show"}</span></button>`;
     if (showDone[key]) html += done.map(rowHTML).join("");
   }
   return html;
@@ -668,21 +868,31 @@ function groupedItemsHTML(list){
 
 // ---- views ----
 
+let lastRenderedView = null;
+
 function render(){
   if (generateRecurring(s, todayISO(), shift(date, 32)) > 0) save();
-  if (view === "vendor") return renderVendor();
-  if (view === "vendors") return renderVendors();
-  if (view === "accounts") return renderAccounts();
-  if (view === "settings") return renderSettings();
-  if (view === "goals") return renderGoals();
-  renderMain();
+  const freshView = view !== lastRenderedView;
+  lastRenderedView = view;
+  if (view === "vendor") renderVendor();
+  else if (view === "vendors") renderVendors();
+  else if (view === "accounts") renderAccounts();
+  else if (view === "settings") renderSettings();
+  else if (view === "goals") renderGoals();
+  else renderMain();
+  // opening a screen fades it in gently; staying on it doesn't replay the entrance
+  const el = document.getElementById("app");
+  if (freshView && !reduced()) {
+    el.classList.remove("viewfade");
+    void el.offsetWidth;
+    el.classList.add("viewfade");
+  } else if (!freshView) el.classList.remove("viewfade");
 }
 
 function renderGoals(){
   const t = todayISO();
   document.getElementById("app").innerHTML = `
-    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
-    <div class="lt" style="font-size:20px;margin-bottom:4px">Goals</div>
+    <div class="datebar"><button class="backbtn" id="back" aria-label="Back">${CHEV}</button><div class="lt" style="font-size:19px">Goals</div></div>
     <div class="hint" style="padding-left:0;margin-bottom:18px">A cash figure to reach by a date. Progress follows your real balance.</div>
     ${s.goals.length?`<div class="ggrid">${s.goals.map(g=>{
       const gi = goalInfo(s, g, t);
@@ -694,16 +904,16 @@ function renderGoals(){
             ? '<span class="gstate" style="color:var(--out)">behind pace</span>'
             : '<span class="gstate" style="color:var(--in)">on pace</span>';
       const meta = gi.reached
-        ? `Reached with ${fmt(gi.cash)} on hand.`
+        ? `Reached with ${fmtP(gi.cash)} on hand.`
         : gi.daysLeft === 0
-          ? `${fmt(g.targetUsd - gi.cash)} short of the date.`
-          : `${prettyShort(g.targetDate)} · ${gi.daysLeft} ${gi.daysLeft===1?"day":"days"} left · needs +${fmt(gi.needPerDay,"")}/day · pace ${gi.pace>=0?"+":"−"}${fmt(Math.abs(gi.pace),"")}/day`;
+          ? `${fmtP(g.targetUsd - gi.cash)} short of the date.`
+          : `${prettyShort(g.targetDate)} · ${gi.daysLeft} ${gi.daysLeft===1?"day":"days"} left · needs +${fmtPbare(gi.needPerDay)}/day · pace ${gi.pace>=0?"+":"−"}${fmtPbare(Math.abs(gi.pace))}/day`;
       return `<div class="gcard">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
           <div class="name" style="font-weight:600;font-size:15px">${g.name?esc(g.name):"Cash target"}</div>
           ${state}
         </div>
-        <div class="gbig num">${fmt(gi.cash)} <span class="gof">of ${fmt(g.targetUsd)}</span></div>
+        <div class="gbig num">${fmtP(gi.cash)} <span class="gof">of ${fmtP(g.targetUsd)}</span></div>
         <div class="gtrack" role="progressbar" aria-valuenow="${Math.round(gi.pct*100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${(gi.pct*100).toFixed(1)}%;${gi.behind&&!gi.reached?"background:var(--out)":""}"></span></div>
         <div class="gmeta num">${meta}</div>
         <button class="x" data-goal-remove="${g.id}" title="Remove" aria-label="Remove goal">×</button>
@@ -712,7 +922,7 @@ function renderGoals(){
     <div class="addrow" style="margin-top:28px;border:none;padding:0">
       <div class="addgrid" style="grid-template-columns:1fr 130px 160px auto">
         <input id="goalName" placeholder="Reserve cushion" aria-label="Goal name (optional)">
-        <input id="goalAmt" type="number" step="0.01" placeholder="20000" style="text-align:right" aria-label="Target amount USD">
+        <input id="goalAmt" type="number" step="0.01" placeholder="${cadFirst()?"C$ 20000":"US$ 20000"}" style="text-align:right" aria-label="Target amount in ${cadFirst()?"Canadian":"US"} dollars">
         <input id="goalDate" type="date" style="width:100%;font-weight:400;font-size:14px" aria-label="Target date">
         <button class="btn" id="goalAdd">Set goal</button>
       </div>
@@ -729,7 +939,7 @@ function renderGoals(){
     const amt = parseFloat(document.getElementById("goalAmt").value);
     const dt = document.getElementById("goalDate").value;
     if (!(amt > 0) || !dt) return;
-    s.goals.push({ id: uid("g"), name: document.getElementById("goalName").value.trim(), targetUsd: amt, targetDate: dt,
+    s.goals.push({ id: uid("g"), name: document.getElementById("goalName").value.trim(), targetUsd: cadFirst() ? amt/s.rate : amt, targetDate: dt,
                    startUsd: calc(s, t).allTime, createdAt: t });
     save(); render();
   };
@@ -739,6 +949,8 @@ function renderGoals(){
 
 let pendingImport = null;
 let importError = false;
+let pendingCsv = null;
+let csvError = false;
 let undoBuf = null;
 
 function applyTheme(){
@@ -771,8 +983,7 @@ function renderSettings(){
   const last = s.settings.lastBackupAt;
   const diff = pendingImport ? diffStates(s, pendingImport) : null;
   document.getElementById("app").innerHTML = `
-    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
-    <div class="lt" style="font-size:20px;margin-bottom:14px">Settings</div>
+    <div class="datebar"><button class="backbtn" id="back" aria-label="Back">${CHEV}</button><div class="lt" style="font-size:19px">Settings</div></div>
     ${backupDue(s, t)?`<div class="runway low" style="margin:0 0 14px">It's been over 30 days since the last backup.<button class="link" id="dismissBackup">dismiss</button></div>`:""}
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -785,6 +996,24 @@ function renderSettings(){
         <input type="file" id="importFile" accept=".json,application/json" aria-label="Backup file" style="width:auto;font-size:12.5px">
       </div>
       ${importError?`<div class="runway low" style="margin-top:10px">That file isn't a Money backup.</div>`:""}
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="sub" style="margin:0" for="slashFile">Import a Slash CSV export</label>
+        <input type="file" id="slashFile" accept=".csv,text/csv" aria-label="Slash CSV export" style="width:auto;font-size:12.5px">
+      </div>
+      ${csvError?`<div class="runway low" style="margin-top:10px">That doesn't look like a Slash transactions export.</div>`:""}
+      ${pendingCsv?(()=>{ const inSum = pendingCsv.adds.filter(a=>a.kind==="in").reduce((t,a)=>t+a.usd,0);
+        const outSum = pendingCsv.adds.filter(a=>a.kind==="out").reduce((t,a)=>t+a.usd,0);
+        return `<div class="summary num" style="margin-top:14px">
+          <span>Adds <b>${pendingCsv.adds.length}</b> ${pendingCsv.adds.length===1?"entry":"entries"} (+${fmtPbare(inSum)} in, −${fmtPbare(outSum)} out)</span>
+          ${pendingCsv.updates.length?`<span>marks <b>${pendingCsv.updates.length}</b> pending ${pendingCsv.updates.length===1?"entry":"entries"} settled</span>`:""}
+          ${pendingCsv.dupes?`<span>skips ${pendingCsv.dupes} already logged</span>`:""}
+          ${pendingCsv.pairs?`<span>ignores ${pendingCsv.pairs} cancelling ${pendingCsv.pairs===1?"pair":"pairs"}</span>`:""}
+          ${pendingCsv.authSkips?`<span>ignores ${pendingCsv.authSkips} superseded ${pendingCsv.authSkips===1?"hold":"holds"}</span>`:""}
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn" id="applyCsv">Apply</button>
+          <button class="link" id="cancelCsv" style="margin-left:0">cancel</button>
+        </div>`; })():""}
       ${diff?`<div class="summary num" style="margin-top:14px">
           <span>This will add <b>${diff.items.add}</b>, change <b>${diff.items.change}</b>, remove <b>${diff.items.remove}</b> ${diff.items.remove===1?"entry":"entries"}</span>
           <span>Vendors: +${diff.vendors.add} ~${diff.vendors.change} −${diff.vendors.remove}</span>
@@ -803,6 +1032,15 @@ function renderSettings(){
       days ahead</label>
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <label class="sub" style="margin:0">Currency shown first
+        <select id="curSel" aria-label="Primary currency" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
+          <option value="usd" ${s.settings.currencyDisplay!=="cad"?"selected":""}>US dollars</option>
+          <option value="cad" ${s.settings.currencyDisplay==="cad"?"selected":""}>Canadian dollars</option>
+        </select>
+      </label>
+      <div class="sub" style="margin-top:8px">The other currency stays visible underneath. Amounts are kept in USD; CAD-locked entries never move.</div>
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <label class="sub" style="margin:0">Appearance
         <select id="themeSel" aria-label="Theme" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
           <option value="system" ${s.settings.theme==="system"?"selected":""}>follow the system</option>
@@ -814,7 +1052,7 @@ function renderSettings(){
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div class="sub" style="margin:0">Keyboard: n new entry · ← → change day · t today · / search · Esc cancel</div>
     </div>`;
-  document.getElementById("back").onclick = ()=>{ pendingImport=null; view="day"; render(); };
+  document.getElementById("back").onclick = ()=>{ pendingImport=null; pendingCsv=null; csvError=false; view="day"; render(); };
   document.getElementById("exportJson").onclick = exportJson;
   document.getElementById("exportCsvBtn").onclick = exportCsv;
   const dis = document.getElementById("dismissBackup");
@@ -834,6 +1072,26 @@ function renderSettings(){
     };
     rd.readAsText(f);
   };
+  document.getElementById("slashFile").onchange = e=>{
+    const f = e.target.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = ()=>{
+      try { pendingCsv = mapSlashCsv(s, rd.result); csvError = !pendingCsv; }
+      catch { pendingCsv = null; csvError = true; }
+      render();
+    };
+    rd.readAsText(f);
+  };
+  const ac = document.getElementById("applyCsv");
+  if (ac) ac.onclick = ()=>{
+    armUndo(structuredClone(s));
+    applySlashImport(s, pendingCsv);
+    pendingCsv = null;
+    save(); view = "day"; render();
+  };
+  const cc = document.getElementById("cancelCsv");
+  if (cc) cc.onclick = ()=>{ pendingCsv = null; render(); };
   const ap = document.getElementById("applyImport");
   if (ap) ap.onclick = ()=>{ s = pendingImport; pendingImport = null; date = s.lastDate || todayISO(); save(); render(); };
   const ci = document.getElementById("cancelImport");
@@ -846,6 +1104,10 @@ function renderSettings(){
     s.settings.theme = e.target.value;
     save(); applyTheme(); render();
   };
+  document.getElementById("curSel").onchange = e=>{
+    s.settings.currencyDisplay = e.target.value === "cad" ? "cad" : "usd";
+    save(); render();
+  };
 }
 
 function renderAccounts(){
@@ -855,19 +1117,24 @@ function renderAccounts(){
     .reduce((t, x) => t + (x.kind === "in" ? x.usd : -x.usd), 0);
   document.getElementById("app").innerHTML = `
     <div class="datebar">
-      <button class="link" id="back" style="margin-left:0">‹ back</button>
+      <button class="backbtn" id="back" aria-label="Back">${CHEV}</button>
+      <div class="lt" style="font-size:19px">Accounts</div>
       <div class="tabs">
         <button class="tab ${accountsFilter==="all"?"on":""}" data-afilter="all">All</button>
         <button class="tab ${accountsFilter==="business"?"on":""}" data-afilter="business">Business</button>
         <button class="tab ${accountsFilter==="personal"?"on":""}" data-afilter="personal">Personal</button>
       </div>
     </div>
-    <div class="lt" style="font-size:20px;margin-bottom:14px">Accounts</div>
+    <div class="hero num">
+      <div class="lbl">${accountsFilter==="all"?"Across all accounts":accountsFilter==="business"?"Business total":"Personal total"}</div>
+      <div class="heron" style="color:${total<0?"var(--out)":"var(--in)"}">${fmtP(total)}</div>
+      <div class="sub">${fmtSec(total)}</div>
+    </div>
     ${shown.length?shown.map(a=>{
       const bal = accountBalance(s, a);
       const balCell = editAccId===a.id
-        ? `<span style="display:flex;gap:6px;align-items:center"><input id="accDraft" type="number" step="0.01" value="${round2(bal).toFixed(2)}" style="width:130px;padding:5px 8px;text-align:right" aria-label="Balance for ${esc(a.name)}"><button class="btn" data-accsave="${a.id}" style="padding:6px 10px;font-size:12px">Save</button></span>`
-        : `<button class="bare num" data-accedit="${a.id}" style="font-size:15px;font-weight:600;color:${bal<0?"var(--out)":"var(--ink)"}">${fmt(bal)}<span class="tinylink">edit</span></button>`;
+        ? `<span style="display:flex;gap:6px;align-items:center"><span class="sub num" style="margin:0">${cadFirst()?"C$":"US$"}</span><input id="accDraft" type="number" step="0.01" value="${round2(cadFirst()?bal*s.rate:bal).toFixed(2)}" style="width:130px;padding:5px 8px;text-align:right" aria-label="Balance for ${esc(a.name)} in ${cadFirst()?"Canadian":"US"} dollars"><button class="btn" data-accsave="${a.id}" style="padding:6px 10px;font-size:12px">Save</button></span>`
+        : `<button class="bare num" data-accedit="${a.id}" style="font-size:15px;font-weight:600;color:${bal<0?"var(--out)":"var(--ink)"}">${fmtP(bal)}<span class="tinylink">edit</span></button>`;
       return `<div class="row" style="cursor:default">
         <div class="sw" style="background:${a.color}"></div>
         <input class="bare-input" data-acc-name="${a.id}" value="${esc(a.name)}" aria-label="Name of ${esc(a.name)}">
@@ -879,10 +1146,7 @@ function renderAccounts(){
         <button class="x" data-acc-remove="${a.id}" title="Remove" aria-label="Remove ${esc(a.name)}">×</button>
       </div>`;
     }).join(""):'<div class="empty">No accounts yet.</div>'}
-    <div class="summary num" style="margin-top:14px">
-      <span>${accountsFilter==="all"?"Across all accounts":accountsFilter==="business"?"Business total":"Personal total"}: <b>${fmt(total)}</b></span>
-      ${Math.abs(unassigned)>0.004?`<span>${fmt(unassigned)} of checked entries has no account</span>`:""}
-    </div>
+    ${Math.abs(unassigned)>0.004?`<div class="summary num" style="margin-top:14px"><span>${fmtP(unassigned)} of checked entries has no account</span></div>`:""}
     <div class="addrow" style="margin-top:26px">
       <div class="addgrid" style="grid-template-columns:1fr 130px auto">
         <input id="accName" placeholder="Mercury" aria-label="Account name">
@@ -912,7 +1176,7 @@ function renderAccounts(){
       const a = s.accounts.find(z=>z.id===b.dataset.accsave);
       const v = parseFloat(document.getElementById("accDraft").value);
       // the balance is derived, so editing it adjusts the account's starting figure
-      if (!isNaN(v)) a.start = v - (accountBalance(s, a) - a.start);
+      if (!isNaN(v)) { const usdV = cadFirst() ? v/s.rate : v; a.start = usdV - (accountBalance(s, a) - a.start); }
       editAccId = null; save(); render();
     };
     b.onclick = doSave;
@@ -934,6 +1198,8 @@ function datalistHTML(){
   return `<datalist id="vendorNames">${s.vendors.map(v=>`<option value="${esc(v.name)}">`).join("")}</datalist>`;
 }
 
+const CHEV = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.8 3.5L5.3 8l4.5 4.5"/></svg>';
+
 const NAV_ICONS = {
   accounts: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6L8 2.8 13.5 6M3.5 6v6M6.5 6v6M9.5 6v6M12.5 6v6M2.5 13.2h11"/></svg>',
   vendors: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 5.8h9.6l-1-3H4.2l-1 3zM3.8 5.8v7.4h8.4V5.8M6.6 13.2V9.4h2.8v3.8"/></svg>',
@@ -952,17 +1218,19 @@ function renderMain(){
   const m = calc(s, date);
   const isToday = date===todayISO();
   const isStart = date===s.startDate;
+  const curSym = cadFirst() ? "C$" : "US$";
+  const inPrimary = usd => round2(cadFirst() ? usd * s.rate : usd).toFixed(2);
   let startCell;
   if (isStart) {
     startCell = editStart
-      ? `<div style="display:flex;gap:6px;align-items:center"><input id="startDraft" type="number" step="0.01" value="${s.startBudget.toFixed(2)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Starting balance"><button class="btn" id="saveStart" style="padding:6px 10px;font-size:12px">Save</button></div>`
-      : `<button class="bare num big" id="editStart">${fmt(s.startBudget)}<span class="tinylink">edit</span></button>`;
+      ? `<div style="display:flex;gap:6px;align-items:center"><span class="sub num" style="margin:0">${curSym}</span><input id="startDraft" type="number" step="0.01" value="${inPrimary(s.startBudget)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Starting balance in ${cadFirst()?"Canadian":"US"} dollars"><button class="btn" id="saveStart" style="padding:6px 10px;font-size:12px">Save</button></div>`
+      : `<button class="bare num big" id="editStart">${fmtP(s.startBudget)}<span class="tinylink">edit</span></button>`;
   } else {
     const a = (s.adjust || {})[date] || 0;
     startCell = editCarry
-      ? `<div style="display:flex;gap:6px;align-items:center"><input id="carryDraft" type="number" step="0.01" value="${round2(m.carry).toFixed(2)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Start of day"><button class="btn" id="saveCarry" style="padding:6px 10px;font-size:12px">Save</button></div>`
-      : `<button class="bare num big" id="editCarry">${fmt(m.carry)}<span class="tinylink">edit</span></button>
-         <div class="sub">${a ? `adjusted ${fmt(a)}<button class="link" id="clearAdj">clear</button>` : date < s.startDate ? "before the start" : "carried from before"}</div>`;
+      ? `<div style="display:flex;gap:6px;align-items:center"><span class="sub num" style="margin:0">${curSym}</span><input id="carryDraft" type="number" step="0.01" value="${inPrimary(m.carry)}" style="font-size:18px;font-weight:600;padding:4px 8px;width:130px" aria-label="Start of day in ${cadFirst()?"Canadian":"US"} dollars"><button class="btn" id="saveCarry" style="padding:6px 10px;font-size:12px">Save</button></div>`
+      : `<button class="bare num big" id="editCarry">${fmtP(m.carry)}<span class="tinylink">edit</span></button>
+         <div class="sub">${a ? `adjusted ${fmtP(a)}<button class="link" id="clearAdj">clear</button>` : date < s.startDate ? "before the start" : "carried from before"}</div>`;
   }
   const endColor = m.end<0 ? "var(--out)" : "var(--in)";
   const endFill = m.end<0 ? "var(--outSoft)" : "var(--inSoft)";
@@ -983,7 +1251,7 @@ function renderMain(){
         return `<div class="pcard">
           <div class="pcard-h">
             <button class="namebtn pname" data-vopen="${v.id}">${esc(v.name)}</button>
-            <span class="pnet num" style="color:${net<0?"var(--out)":"var(--in)"}">${net>=0?"+":""}${fmt(net,"")}${pending?`<span class="tinylink" style="text-decoration:none">${pending} pending</span>`:""}</span>
+            <span class="pnet num" style="color:${net<0?"var(--out)":"var(--in)"}">${net>=0?"+":""}${fmtPbare(net)}${pending?`<span class="tinylink" style="text-decoration:none">${pending} pending</span>`:""}</span>
           </div>
           <div data-rows="p${v.id}">${stackedRows(items, "p"+v.id, false)}</div>
         </div>`;
@@ -1020,9 +1288,9 @@ function renderMain(){
     <div class="dayhead">${pretty(date)}</div>
     <div class="flow num">
       <div class="cell"><div class="lbl">${isStart?"Starting with":"Start of day"}</div><div>${startCell}</div></div>
-      <div class="cell"><div class="lbl" style="color:var(--in)">Came in</div><div><div class="big" style="color:var(--in)" id="numIn">+${fmt(m.inC,"")}</div>${m.inA>m.inC?`<div class="sub">of ${fmt(m.inA,"")} expected</div>`:""}</div></div>
-      <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)" id="numOut">−${fmt(m.outC,"")}</div>${m.outA>m.outC?`<div class="sub">of ${fmt(m.outA,"")} owed</div>`:""}</div></div>
-      <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}" id="numLeft">${fmt(m.end)}</div><div class="sub">${fmt(m.end*s.rate,"C$")}</div></div></div>
+      <div class="cell"><div class="lbl" style="color:var(--in)">Came in</div><div><div class="big" style="color:var(--in)" id="numIn">+${fmtPbare(m.inC)}</div>${m.inA>m.inC?`<div class="sub">of ${fmtPbare(m.inA)} expected</div>`:""}</div></div>
+      <div class="cell"><div class="lbl" style="color:var(--out)">Went out</div><div><div class="big" style="color:var(--out)" id="numOut">−${fmtPbare(m.outC)}</div>${m.outA>m.outC?`<div class="sub">of ${fmtPbare(m.outA)} owed</div>`:""}</div></div>
+      <div class="cell" style="background:${endFill}"><div class="lbl">Left</div><div><div class="huge" style="color:${endColor}" id="numLeft">${fmtP(m.end)}</div><button class="bare sub" id="flipCur" title="Show ${cadFirst()?"US dollars":"Canadian dollars"} first" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${fmtSec(m.end)}</button></div></div>
     </div>
     ${view==="day"?(()=>{ const t = todayISO();
       const r = runwayInfo(s, t);
@@ -1034,8 +1302,8 @@ function renderMain(){
       if (g) {
         const gi = goalInfo(s, g, t);
         goalLine = gi.reached
-          ? `<span class="ptext">Goal reached: ${fmt(g.targetUsd)}${g.name?` — ${esc(g.name)}`:""}.</span>`
-          : `<span class="ptext${gi.behind?" low":""}">${g.name?esc(g.name)+" — ":""}${fmt(g.targetUsd)} by ${prettyShort(g.targetDate)} · ${Math.round(gi.pct*100)}% there${gi.needPerDay>0?` · needs +${fmt(gi.needPerDay,"")}/day`:""}</span>
+          ? `<span class="ptext">Goal reached: ${fmtP(g.targetUsd)}${g.name?` — ${esc(g.name)}`:""}.</span>`
+          : `<span class="ptext${gi.behind?" low":""}">${g.name?esc(g.name)+" — ":""}${fmtP(g.targetUsd)} by ${prettyShort(g.targetDate)} · ${Math.round(gi.pct*100)}% there${gi.needPerDay>0?` · needs +${fmtPbare(gi.needPerDay)}/day`:""}</span>
              <span class="gbar" aria-hidden="true"><span style="width:${(gi.pct*100).toFixed(1)}%"></span></span>`;
       }
       const ins = insightsFor(s, t)[0];
@@ -1047,26 +1315,31 @@ function renderMain(){
         </div>
       </div>`; })():""}
     ${(()=>{ const fl = s.items.filter(x=>!x.checked && x.settle==="pending").reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
-      return Math.abs(fl)>0.004 ? `<div class="summary num"><span><b>${fmt(fl)}</b> authorized at the bank, waiting to settle — not counted in Left yet</span></div>` : ""; })()}
+      return Math.abs(fl)>0.004 ? `<div class="summary num"><span><b>${fmtP(fl)}</b> authorized at the bank, waiting to settle — not counted in Left yet</span></div>` : ""; })()}
     <div class="summary num">
-      <span>All days so far: <b>${fmt(m.allTime)}</b></span>
-      <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmt(m.ifAll)}</b></span>
+      <span>All days so far: <b>${fmtP(m.allTime)}</b></span>
+      <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
       ${m.pendingEarlier>0&&view==="day"?`<button class="link" style="margin-left:0;color:var(--out)" data-view="all">${m.pendingEarlier} unchecked from earlier days</button>`:""}
     </div>
     ${body}
     ${sectionNavHTML()}
     </div>
     <div class="foot">
-      1 USD = ${s.rate.toFixed(4)} CAD<button class="link" id="rateToggle">change</button>
-      ${showRate?`<input id="rateInput" type="number" step="0.0001" value="${s.rate}" style="width:110px;margin-left:10px;display:inline-block;padding:5px 8px" aria-label="USD to CAD rate">`:""}
+      1 USD = ${s.rate.toFixed(4)} CAD
+      <span style="margin-left:6px">${s.settings.rateMode==="manual"?"· set by hand":`· live${s.settings.rateUpdatedAt?`, updated ${prettyShort(s.settings.rateUpdatedAt)}`:""}`}</span>
+      <button class="link" id="rateToggle">change</button>
+      ${showRate?`<input id="rateInput" type="number" step="0.0001" value="${s.rate}" style="width:110px;margin-left:10px;display:inline-block;padding:5px 8px" aria-label="USD to CAD rate">
+        ${s.settings.rateMode==="manual"?'<button class="link" id="liveRate">use the live rate</button>':""}`:""}
       <span style="margin-left:18px">Started ${pretty(s.startDate)} with ${fmt(s.startBudget)}</span>
     </div>
     ${undoChipHTML()}`;
   bindMain();
-  paintNum("numLeft", m.end, v=>fmt(v));
-  paintNum("numIn", m.inC, v=>"+"+fmt(v,""));
-  paintNum("numOut", m.outC, v=>"−"+fmt(Math.abs(v),""));
+  paintNum("numLeft", m.end, v=>fmtP(v));
+  paintNum("numIn", m.inC, v=>"+"+fmtPbare(v));
+  paintNum("numOut", m.outC, v=>"−"+fmtPbare(Math.abs(v)));
   lastAnimDate = date;
+  const flip = document.getElementById("flipCur");
+  if (flip) flip.onclick = ()=>{ s.settings.currencyDisplay = cadFirst() ? "usd" : "cad"; save(); render(); };
 }
 
 function renderVendor(){
@@ -1077,12 +1350,11 @@ function renderVendor(){
   const dir = v.defaultKind === "in" ? "Received" : "Paid";
   document.getElementById("app").innerHTML = `
     ${datalistHTML()}
-    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
-    <div class="lt" style="font-size:20px;margin-bottom:4px">${esc(v.name)}</div>
+    <div class="datebar"><button class="backbtn" id="back" aria-label="Back">${CHEV}</button><div class="lt" style="font-size:19px">${esc(v.name)}</div></div>
     <div class="summary num" style="margin-top:8px">
-      <span>${dir} this year: <b>${fmt(st.doneYear)}</b></span>
-      <span>All time: <b>${fmt(st.doneAll)}</b></span>
-      <span>${st.count} ${st.count===1?"entry":"entries"}, average <b>${fmt(st.avg)}</b></span>
+      <span>${dir} this year: <b>${fmtP(st.doneYear)}</b></span>
+      <span>All time: <b>${fmtP(st.doneAll)}</b></span>
+      <span>${st.count} ${st.count===1?"entry":"entries"}, average <b>${fmtP(st.avg)}</b></span>
       <span>Last ${v.defaultKind==="in"?"landed":"paid"}: <b>${st.last?prettyShort(st.last):"—"}</b></span>
       <span>Next expected: <b>${st.next?prettyShort(st.next):"—"}</b></span>
     </div>
@@ -1157,12 +1429,11 @@ function renderVendors(){
     .map(v => ({ v, st: vendorStats(s, v, t) }))
     .sort((a,b) => (b.st.last||"").localeCompare(a.st.last||""));
   document.getElementById("app").innerHTML = `
-    <div class="datebar"><button class="link" id="back" style="margin-left:0">‹ back</button></div>
-    <div class="lt" style="font-size:20px;margin-bottom:14px">Vendors</div>
+    <div class="datebar"><button class="backbtn" id="back" aria-label="Back">${CHEV}</button><div class="lt" style="font-size:19px">Vendors</div></div>
     ${rows.length?rows.map(({v,st})=>`
       <div class="row" style="cursor:default">
         <div class="name"><button class="namebtn" data-vopen="${v.id}">${esc(v.name)}</button>${v.isProcessor?'<span class="tinytag">processor</span>':""}</div>
-        <div class="sub num" style="margin:0">${st.count} ${st.count===1?"entry":"entries"} · ${fmt(st.doneAll)} · ${st.last?prettyShort(st.last):"—"}</div>
+        <div class="sub num" style="margin:0">${st.count} ${st.count===1?"entry":"entries"} · ${fmtP(st.doneAll)} · ${st.last?prettyShort(st.last):"—"}</div>
         <button class="x" data-ven-remove="${v.id}" title="Remove" aria-label="Remove ${esc(v.name)}">×</button>
       </div>`).join(""):'<div class="empty">No vendors yet. They appear as you log entries, or add one below.</div>'}
     <div class="addrow" style="margin-top:26px">
@@ -1246,10 +1517,22 @@ function bindShared(){
       save(); render();
     };
   });
+  app.querySelectorAll("[data-lag]").forEach(b=>b.onclick=e=>{
+    e.preventDefault();
+    const x = s.items.find(i=>i.id===b.dataset.lag);
+    const target = lagSuggestion(s, x);
+    if (target) { redateItem(s, x.id, target, todayISO()); save(); render(); }
+  });
+  app.querySelectorAll("[data-yesterday]").forEach(b=>b.onclick=e=>{
+    e.preventDefault();
+    const x = s.items.find(i=>i.id===b.dataset.yesterday);
+    redateItem(s, x.id, shift(x.date, -1), todayISO());
+    expandedId = null; save(); render();
+  });
   app.querySelectorAll("[data-redate]").forEach(el=>{
     el.onchange = ()=>{
       if (!el.value) return;
-      redateItem(s, el.dataset.redate, el.value);
+      redateItem(s, el.dataset.redate, el.value, todayISO());
       expandedId = null; save(); render();
     };
   });
@@ -1328,9 +1611,10 @@ function bindMain(){
   if ($("saveCarry")) { const doSave=()=>{
       const v=parseFloat($("carryDraft").value); editCarry=false;
       if(!isNaN(v)){
+        const usdV = cadFirst() ? v/s.rate : v;
         s.adjust = s.adjust || {};
         const cur = calc(s, date).carry;
-        const next = ((s.adjust[date]||0) + (v - cur));
+        const next = ((s.adjust[date]||0) + (usdV - cur));
         if (Math.abs(next) < 0.005) delete s.adjust[date]; else s.adjust[date] = next;
       }
       save(); render(); };
@@ -1372,10 +1656,11 @@ function bindMain(){
       save(); render();
     };
   });
-  if ($("saveStart")) { const doSave=()=>{ const v=parseFloat($("startDraft").value); editStart=false; if(!isNaN(v)){ s.startBudget=v; s.startDate=date; } save(); render(); };
+  if ($("saveStart")) { const doSave=()=>{ const v=parseFloat($("startDraft").value); editStart=false; if(!isNaN(v)){ s.startBudget = cadFirst() ? v/s.rate : v; s.startDate=date; } save(); render(); };
     $("saveStart").onclick=doSave; $("startDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editStart=false; render(); } }; }
   $("rateToggle").onclick = ()=>{ showRate=!showRate; render(); };
-  if ($("rateInput")) $("rateInput").oninput = e=>{ s.rate=parseFloat(e.target.value)||1; save(); const keep=e.target; const v=keep.value; render(); const again=$("rateInput"); if(again){ again.value=v; again.focus(); } };
+  if ($("rateInput")) $("rateInput").oninput = e=>{ s.rate=parseFloat(e.target.value)||1; s.settings.rateMode="manual"; save(); const keep=e.target; const v=keep.value; render(); const again=$("rateInput"); if(again){ again.value=v; again.focus(); } };
+  if ($("liveRate")) $("liveRate").onclick = ()=>{ s.settings.rateMode="live"; showRate=false; save(); render(); refreshRate(); };
   if ($("search")) $("search").oninput = e=>{
     searchQ = e.target.value;
     $("allList").innerHTML = allListHTML();
@@ -1387,7 +1672,7 @@ function bindMain(){
 function add(kind){
   const d=drafts[kind]; const a=parseFloat(d.amount)||0;
   if(!d.name.trim()||!a) return;
-  const item = { id:uid("x"), kind, date, name:d.name.trim(), usd: d.cur==="CAD"?a/s.rate:a, cadFixed: d.cur==="CAD"?a:null, checked:false, accountId:null, vendorId:null, note:"", receiptUrl:"", recurringSourceId:null };
+  const item = { id:uid("x"), kind, date, name:d.name.trim(), usd: d.cur==="CAD"?a/s.rate:a, cadFixed: d.cur==="CAD"?a:null, checked:false, accountId:null, vendorId:null, note:"", receiptUrl:"", recurringSourceId:null, settle:null, createdAt: date };
   const v = upsertVendorFromEntry(s, item);
   item.accountId = v.defaultAccountId;
   s.items.push(item);
@@ -1404,7 +1689,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport };
 } else {
   s = load();
   date = s.lastDate || todayISO();
@@ -1414,6 +1699,8 @@ if (typeof window === "undefined") {
   if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     navigator.serviceWorker.register("sw.js").catch(()=>{});
   }
+  refreshRate();
+  setInterval(refreshRate, 6 * 60 * 60 * 1000);
 
   document.addEventListener("keydown", e => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;

@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -344,6 +344,95 @@ const round2 = n => Math.round(n * 100) / 100;
     items: [{ id: "z1", kind: "out", date: "2026-09-01", name: "Ghost", usd: 5, cadFixed: null, checked: false, accountId: "gone", vendorId: "gone", note: "", receiptUrl: "", recurringSourceId: "gone" }],
     settings: { procSeeded: true } });
   assert("dangling links dissolve on load", cleaned.items[0].accountId === null && cleaned.items[0].vendorId === null && cleaned.items[0].recurringSourceId === null);
+}
+
+// 20. Live rate sanity and the learned authorization lag
+{
+  const st = structuredClone(SEED);
+  st.settings = { rateMode: "live", rateUpdatedAt: null };
+  assert("a sane live rate applies and stamps the day", applyLiveRate(st, 1.4012, "2026-09-01") === true && st.rate === 1.4012 && st.settings.rateUpdatedAt === "2026-09-01");
+  assert("an insane rate is rejected", applyLiveRate(st, 47, "2026-09-01") === false && st.rate === 1.4012);
+  assert("a CAD-locked entry's CAD never moves with the rate", st.items[0].cadFixed === 2500);
+  // a rate the user set by hand before live rates existed is treated as manual
+  const kept = ensure({ version: 6, rate: 1.36, accounts: [], vendors: [], items: [], settings: {} });
+  const fresh = ensure({ version: 6, rate: 1.389, accounts: [], vendors: [], items: [], settings: {} });
+  assert("a pre-existing custom rate stays manual after the update", kept.settings.rateMode === "manual" && fresh.settings.rateMode === "live");
+  // both currencies are searchable
+  const sx = { id: "cur1", kind: "out", date: "2026-09-01", name: "Meta ads", usd: 100, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null };
+  assert("the CAD figure of an entry is searchable too", matchesSearch({ vendors: [], rate: 1.389 }, sx, "138.90") && matchesSearch({ vendors: [], rate: 1.389 }, sx, "100"));
+
+  // Sushi Shop: logged today, moved to yesterday once -> the app learns the lag
+  const st2 = structuredClone(SEED);
+  const sushi = { id: "ss1", kind: "out", date: "2026-09-01", name: "Sushi Shop", usd: 50.36, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, createdAt: "2026-09-01" };
+  const v = upsertVendorFromEntry(st2, sushi); st2.items.push(sushi);
+  redateItem(st2, "ss1", "2026-08-31", "2026-09-01");
+  assert("moving an entry back a day teaches the vendor its lag", v.dayLag === 1);
+  // fixing an old typo teaches nothing
+  const old = { id: "ss0", kind: "out", date: "2026-08-10", name: "Sushi Shop", usd: 20, cadFixed: null, checked: true, accountId: null, vendorId: v.id, note: "", receiptUrl: "", recurringSourceId: null, createdAt: "2026-08-10" };
+  st2.items.push(old); v.dayLag = 0;
+  redateItem(st2, "ss0", "2026-08-08", "2026-09-01");
+  assert("correcting an old entry never teaches a lag", v.dayLag === 0);
+  v.dayLag = 1;
+  const next = { id: "ss2", kind: "out", date: "2026-09-02", name: "Sushi Shop", usd: 30, cadFixed: null, checked: true, accountId: null, vendorId: v.id, note: "", receiptUrl: "", recurringSourceId: null, createdAt: "2026-09-02" };
+  st2.items.push(next);
+  assert("the next entry gets a yesterday suggestion", lagSuggestion(st2, next) === "2026-09-01");
+  redateItem(st2, "ss2", "2026-09-01", "2026-09-02");
+  assert("once moved, the suggestion goes away", lagSuggestion(st2, next) === null);
+  assert("recurring and unlinked entries never get suggestions",
+    lagSuggestion(st2, { ...next, id: "x", recurringSourceId: "r" }) === null
+    && lagSuggestion(st2, { ...next, id: "y", vendorId: null }) === null);
+}
+
+// 21. Slash CSV import: dates, settlement, CAD locks, dedupe, cancelling pairs
+{
+  assert("bank names clean up", cleanBankName("Incoming ACH credit from EMS") === "EMS"
+    && cleanBankName("ACH debit from GATEWAY SERVICES") === "GATEWAY SERVICES"
+    && cleanBankName("SHOPIFY* 581951127") === "SHOPIFY"
+    && cleanBankName("PHARMAPRIX #1811") === "PHARMAPRIX"
+    && cleanBankName("SUSHI SHOP - 2250") === "SUSHI SHOP");
+  assert("quoted CSV fields parse", parseCsv('"a,b",2\nc,"d""e"')[0][0] === "a,b" && parseCsv('"a,b",2\nc,"d""e"')[1][1] === 'd"e');
+
+  const HEAD = "Id,Date (UTC),Description,Amount,Foreign Amount,Foreign Currency,Foreign Exchange Rate,Type,Card ID,Last 4,Card Expiry Month,Card Expiry Year,Authorization Date (UTC),Card Name,Card Group Name,Virtual Account ID,Virtual Account Name,Account Type,Order Id,Reference Number,Decline Reason,Status,Memo,External Description,Receiver ID,Note";
+  // noon UTC keeps the local date identical in any sane timezone
+  const csv = [HEAD,
+    '"tx_credit",2026-09-01 12:00:00PM,"Incoming ACH credit from EMS",189.95,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,',
+    '"tx_debit",2026-09-01 12:00:00PM,"ACH debit from EMS",-30,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,',
+    '"tx_sushi",2026-09-01 12:05:00PM,"SUSHI SHOP - 2250",-50.36,69.71,"CAD",0.72242,"card_settlement",,"5824",,,2026-08-31 12:10:00PM,,,,"Primary Account","Credit",,,,"settled",,,,',
+    '"tx_hold",2026-09-01 12:06:00PM,"PHARMAPRIX #1810",-60.63,83.93,"CAD",0.72239,"card_authorization",,"5824",,,,,,,"Primary Account","Credit",,,,"pending",,,,',
+    '"tx_rev1",2026-09-01 12:07:00PM,"ACH debit from KURV",-77,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,',
+    '"tx_rev2",2026-09-01 12:08:00PM,"Incoming ACH credit from KURV",77,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,',
+  ].join("\n");
+  const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true };
+  const plan = mapSlashCsv(st, csv);
+  assert("cancelling pair is ignored", plan.pairs === 1 && !plan.adds.some(a => a.usd === 77));
+  assert("adds the real lines", plan.adds.length === 4 && plan.dupes === 0);
+  const credit = plan.adds.find(a => a.importId === "tx_credit");
+  assert("settled ACH credit lands checked on its settlement day", credit.kind === "in" && credit.checked === true && credit.date === "2026-09-01" && credit.settle === "2026-09-01");
+  const sushi = plan.adds.find(a => a.importId === "tx_sushi");
+  assert("card purchase sits on its authorization day with CAD locked", sushi.date === "2026-08-31" && sushi.settle === "2026-09-01" && sushi.cadFixed === 69.71 && sushi.usd === 50.36 && sushi.name === "SUSHI SHOP");
+  const hold = plan.adds.find(a => a.importId === "tx_hold");
+  assert("a pending card hold counts as money held, not settled", hold.checked === true && hold.settle === "pending");
+  applySlashImport(st, plan);
+  assert("vendors are created and linked on apply", st.items.length === 4 && st.items.every(x => x.vendorId));
+  const again = mapSlashCsv(st, csv);
+  assert("re-importing the same file changes nothing", again.adds.length === 0 && again.updates.length === 0 && again.dupes === 4);
+  // a later export where the hold settled completes the pending entry instead of duplicating
+  const csv2 = [HEAD,
+    '"tx_hold_settled",2026-09-02 12:00:00PM,"PHARMAPRIX #1810",-60.63,83.93,"CAD",0.72239,"card_settlement",,"5824",,,2026-09-01 12:06:00PM,,,,"Primary Account","Credit",,,,"settled",,,,',
+  ].join("\n");
+  const plan2 = mapSlashCsv(st, csv2);
+  assert("a settlement completes the earlier pending hold", plan2.adds.length === 0 && plan2.updates.length === 1);
+  applySlashImport(st, plan2);
+  const done = st.items.find(x => x.importId === "tx_hold_settled");
+  assert("the completed hold is settled with the date", done.settle === "2026-09-02" && done.checked === true);
+
+  // bank-truncated names reuse the existing vendor instead of duplicating
+  const st3 = structuredClone(SEED); st3.items = []; st3.vendors = [];
+  const full = upsertVendorFromEntry(st3, { id: "p1", kind: "in", date: "2026-08-31", name: "PHOENIX ECOMMERCE", usd: 100, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  const cut = { id: "p2", kind: "in", date: "2026-09-01", name: "PHOENIX ECOMMERC", usd: 200, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null };
+  assert("truncated bank name joins the full vendor", upsertVendorFromEntry(st3, cut).id === full.id && st3.vendors.length === 1);
+  const ems = upsertVendorFromEntry(st3, { id: "p3", kind: "in", date: "2026-09-01", name: "EMS", usd: 10, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  assert("short names never fuzzy-match", ems.id !== full.id && st3.vendors.length === 2);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
