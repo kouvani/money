@@ -1280,12 +1280,23 @@ function renderMain(){
       const cards = [...byVendor.values()].map(({ v, items }) => {
         const net = items.filter(x=>x.checked).reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
         const pending = items.filter(x=>!x.checked).length;
+        // payouts and anything pending stay in sight; paid fees and debits fold behind one line
+        const key = "p" + v.id;
+        const visible = items.filter(x => x.kind === "in" || !x.checked);
+        const folded = items.filter(x => x.kind === "out" && x.checked);
+        let rowsHtml = visible.map(rowHTML).join("");
+        if (folded.length) {
+          const fnet = folded.reduce((t, x) => t - x.usd, 0);
+          rowsHtml += `<button class="donebar num" data-donetoggle="${key}" aria-expanded="${showDone[key]?"true":"false"}">${folded.length} ${folded.length===1?"debit":"debits"} paid · ${fmtP(fnet)}<span class="tinylink">${showDone[key]?"hide":"show"}</span></button>`;
+          if (showDone[key]) rowsHtml += folded.map(rowHTML).join("");
+        }
+        if (!rowsHtml) rowsHtml = '<div class="empty">Nothing today.</div>';
         return `<div class="pcard">
           <div class="pcard-h">
             <button class="namebtn pname" data-vopen="${v.id}">${esc(v.name)}</button>
             <span class="pnet num" style="color:${net<0?"var(--out)":"var(--in)"}">${net>=0?"+":""}${fmtPbare(net)}${pending?`<span class="tinylink" style="text-decoration:none">${pending} pending</span>`:""}</span>
           </div>
-          <div data-rows="p${v.id}">${stackedRows(items, "p"+v.id, false)}</div>
+          <div data-rows="p${v.id}">${rowsHtml}</div>
         </div>`;
       }).join("");
       procBlock = `<div class="psec">
