@@ -486,6 +486,23 @@ function lagSuggestion(st, x){
   return shift(x.date, -v.dayLag);
 }
 
+// Money authorized on day X normally settles the next business morning.
+function nextBusinessDay(iso){
+  let d = shift(iso, 1);
+  while ([0, 6].includes(new Date(d + "T00:00").getDay())) d = shift(d, 1);
+  return d;
+}
+
+// One tap from the tray: count it and stamp the most sensible settled date.
+function settlePending(st, id, today){
+  const x = st.items.find(i => i.id === id);
+  if (!x || x.settle !== "pending") return null;
+  const exp = nextBusinessDay(x.date);
+  x.settle = exp <= today ? exp : today;
+  x.checked = true;
+  return x;
+}
+
 // Checking an entry that was authorized-but-unsettled stamps the settled date.
 function toggleItem(st, id, today){
   const x = st.items.find(i => i.id === id);
@@ -881,6 +898,7 @@ function groupedItemsHTML(list){
 // ---- views ----
 
 let lastRenderedView = null;
+let showPendTray = false;
 
 function render(){
   if (generateRecurring(s, todayISO(), shift(date, 32)) > 0) save();
@@ -1364,8 +1382,19 @@ function renderMain(){
           ${ins?`<span class="ptext${ins.tone==="warn"?" low":""}">${ins.text}</span>`:""}
         </div>
       </div>`; })():""}
-    ${(()=>{ const fl = s.items.filter(x=>!x.checked && x.settle==="pending").reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
-      return Math.abs(fl)>0.004 ? `<div class="summary num"><span><b>${fmtP(fl)}</b> authorized at the bank, waiting to settle — not counted in Left yet</span></div>` : ""; })()}
+    ${(()=>{ const pend = s.items.filter(x=>x.settle==="pending").sort((a,b)=>a.date.localeCompare(b.date));
+      if (!pend.length) return "";
+      const notCounted = pend.filter(x=>!x.checked).reduce((t,x)=>t+(x.kind==="in"?x.usd:-x.usd),0);
+      const t = todayISO();
+      return `<div class="summary num"><span><b>${pend.length}</b> waiting to settle${Math.abs(notCounted)>0.004?` — <b>${fmtP(notCounted)}</b> not counted in Left yet`:""}<button class="link" id="pendTray">${showPendTray?"hide":"review"}</button></span></div>
+      ${showPendTray?`<div class="pendlist">${pend.map(x=>{
+        const exp = nextBusinessDay(x.date);
+        const late = exp < t;
+        return `<div class="row" style="cursor:default">
+          <div class="name">${esc(x.name)}<span class="tinytag">${prettyShort(x.date)}</span><span class="${late?"mark":"notetxt"}">${late?"expected "+prettyShort(exp):"settles ~"+prettyShort(exp)}</span></div>
+          <div class="amt num"><div class="u" style="color:${x.kind==="in"?"var(--in)":"var(--out)"}">${x.kind==="in"?"+":"−"}${fmtPbare(x.usd)}</div></div>
+          <button class="btn" data-psettle="${x.id}" style="padding:6px 12px;font-size:12px">Settled</button>
+        </div>`;}).join("")}</div>`:""}`; })()}
     <div class="summary num">
       <span>All days so far: <b>${fmtP(m.allTime)}</b></span>
       <span>If everything lands and gets paid: <b style="color:${m.ifAll<0?"var(--out)":"var(--ink)"}">${fmtP(m.ifAll)}</b></span>
@@ -1390,6 +1419,12 @@ function renderMain(){
   lastAnimDate = date;
   const flip = document.getElementById("flipCur");
   if (flip) flip.onclick = ()=>{ s.settings.currencyDisplay = cadFirst() ? "usd" : "cad"; save(); render(); };
+  const pt = document.getElementById("pendTray");
+  if (pt) pt.onclick = ()=>{ showPendTray = !showPendTray; render(); };
+  document.querySelectorAll("[data-psettle]").forEach(b=>b.onclick=()=>{
+    settlePending(s, b.dataset.psettle, todayISO());
+    save(); render();
+  });
 }
 
 function renderVendor(){
@@ -1753,7 +1788,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
 } else {
   s = load();
   date = s.lastDate || todayISO();

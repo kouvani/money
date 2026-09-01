@@ -95,6 +95,8 @@ button{cursor:pointer}
 .mark{font-size:10.5px;color:var(--out);margin-left:7px;font-weight:500;white-space:nowrap}
 .summary{margin-top:12px;font-size:13px;color:var(--muted);display:flex;gap:18px;flex-wrap:wrap}
 .summary b{color:var(--ink)}
+.pendlist{margin-top:10px;padding:2px 16px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-s);animation:fadeDown .18s ease}
+.pendlist .row:first-of-type{border-top:none}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:32px}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px 18px 14px}
 .lh{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}

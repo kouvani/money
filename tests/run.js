@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -449,6 +449,26 @@ const round2 = n => Math.round(n * 100) / 100;
   const csv = [HEAD2, '"tx_j1",2026-07-05 12:00:00PM,"Wise",-10,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,'].join("\n");
   const plan = mapSlashCsv(st, csv);
   assert("a wiped month can be re-imported", plan.adds.length === 1 && plan.dupes === 0);
+}
+
+// 23. Settlement tray: business-morning expectations and one-tap settling
+{
+  assert("weekday authorizations settle next morning", nextBusinessDay("2026-09-02") === "2026-09-03");
+  assert("friday night settles monday", nextBusinessDay("2026-09-04") === "2026-09-07");
+  assert("weekend appearances settle monday", nextBusinessDay("2026-09-05") === "2026-09-07" && nextBusinessDay("2026-09-06") === "2026-09-07");
+  const st = structuredClone(SEED);
+  st.items = [
+    { id: "k1", kind: "in", date: "2026-09-04", name: "Kurv payout", usd: 2000, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, settle: "pending" },
+    { id: "h1", kind: "out", date: "2026-09-08", name: "Pharmaprix", usd: 60.63, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, settle: "pending" },
+  ];
+  // reviewed on Tuesday: the friday payout settled monday morning — stamp monday, not tuesday
+  const k = settlePending(st, "k1", "2026-09-08");
+  assert("late settle stamps the expected morning", k.checked === true && k.settle === "2026-09-07");
+  assert("settled payout now counts", Math.round(calc(st, "2026-09-08").allTime*100)/100 === 10342.38);
+  // settling something the same day it appeared stamps today
+  const h = settlePending(st, "h1", "2026-09-08");
+  assert("same-day settle stamps today", h.settle === "2026-09-08");
+  assert("already-settled entries are left alone", settlePending(st, "h1", "2026-09-09") === null);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
