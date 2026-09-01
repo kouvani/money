@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState, fmt } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState, fmt, fmtWhole } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -544,7 +544,7 @@ const round2 = n => Math.round(n * 100) / 100;
     { id: "r2", date: "2026-08-25T12:00:00.000Z", description: "Wise", amountCents: -100000, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-08-25T11:00:00.000Z" },
   ]);
   const out = rebuildFromRecords(st2, recs, 4504.46, "2026-09-01");
-  assert("rebuild replaces everything and starts at the first transaction", st2.items.length === 2 && st2.startDate === "2026-08-20" && st2.startBudget === 0 && Object.keys(st2.adjust).length === 1);
+  assert("rebuild replaces everything and starts at the first transaction", st2.items.length === 2 && st2.startDate === "2026-08-20" && Math.round(st2.startBudget*100)/100 === 504.46 && Object.keys(st2.adjust).length === 0);
   assert("after rebuild today's Left equals Slash", Math.round(calc(st2, "2026-09-01").end*100)/100 === 4504.46 && Math.round(out.matched*100)/100 === 504.46);
 }
 
@@ -576,7 +576,7 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("quick-add: currency", q2 && q2.name === "Chapa's Rent" && q2.amount === 2500 && q2.cur === "CAD");
   const q3 = parseQuickAdd("kurv +2000 pending");
   assert("quick-add: direction and pending", q3 && q3.kind === "in" && q3.pending === true && q3.amount === 2000);
-  assert("quick-add: plain names are left alone", parseQuickAdd("Meta ads") === null && parseQuickAdd("42") === null);
+  assert("quick-add: plain names are left alone", parseQuickAdd("Meta ads") === null && parseQuickAdd("42") === null && parseQuickAdd("Terminal 3") === null && parseQuickAdd("coffee 4.50").amount === 4.5);
 
   const st = structuredClone(SEED);
   st.items[1].checked = true; // cash 6858.01
@@ -585,6 +585,8 @@ const round2 = n => Math.round(n * 100) / 100;
   const f = forecastLow(st, "2026-09-01");
   // day 1 absorbs the overdue Chapa rent (-1799.86), Sep 10 the Regus bill, Sep 15 the payout
   assert("30-day low finds the dip and its day", f.date === "2026-09-10" && Math.round(f.min*100)/100 === Math.round((6858.01 - 2500/1.389 - 5000)*100)/100);
+  st.adjust = { "2026-09-20": 999 };
+  assert("a future adjustment counts once, on its day", Math.round(forecastLow(st, "2026-09-01").endBalance*100)/100 === Math.round((6858.01 - 2500/1.389 - 5000 + 3000 + 999)*100)/100);
   assert("forecast ends after the payout lands", Math.round(f.endBalance*100)/100 === Math.round((6858.01 - 2500/1.389 - 5000 + 3000)*100)/100);
 
   const st2 = structuredClone(SEED); st2.vendors = [];
@@ -602,6 +604,56 @@ const round2 = n => Math.round(n * 100) / 100;
 
   const fresh = freshState();
   assert("a new device starts empty with today as the start", fresh.items.length === 0 && fresh.startBudget === 0 && fresh.settings.fresh === true && /^\d{4}-\d{2}-\d{2}$/.test(fresh.startDate));
+}
+
+// 30. Review fixes: same-id reconciliation, hold window, refund pairing, group keys, negative zero
+{
+  assert("month cells never print −0", fmtWhole(-0.3) === "0" && fmtWhole(-0.6) === "−1");
+  const HEAD = "Id,Date (UTC),Description,Amount,Foreign Amount,Foreign Currency,Foreign Exchange Rate,Type,Card ID,Last 4,Card Expiry Month,Card Expiry Year,Authorization Date (UTC),Card Name,Card Group Name,Virtual Account ID,Virtual Account Name,Account Type,Order Id,Reference Number,Decline Reason,Status,Memo,External Description,Receiver ID,Note";
+  const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true }; st.startDate = "2026-08-01";
+  // a pending credit arrives, then the SAME id comes back settled -> it flips, never duplicates
+  const pend = recsFromSlashApi([{ id: "k1", date: "2026-09-04T12:00:00.000Z", description: "Incoming ACH credit from EMS", amountCents: 200000, status: "pending", detailedStatus: "pending", category: "ach" }]);
+  applySlashImport(st, planFromRecords(st, pend));
+  assert("pending credit lands unchecked", st.items.length === 1 && st.items[0].checked === false && st.items[0].settle === "pending");
+  const settled = recsFromSlashApi([{ id: "k1", date: "2026-09-07T12:00:00.000Z", description: "Incoming ACH credit from EMS", amountCents: 200000, status: "posted", detailedStatus: "settled", category: "ach" }]);
+  const p2 = planFromRecords(st, settled);
+  applySlashImport(st, p2);
+  assert("same id settling updates in place", p2.adds.length === 0 && p2.updates.length === 1 && st.items.length === 1 && st.items[0].checked === true && st.items[0].settle === "2026-09-07");
+  // a hold that Slash later voids stops counting
+  const hold = recsFromSlashApi([{ id: "h1", date: "2026-09-05T12:00:00.000Z", description: "PHARMAPRIX", amountCents: -6063, status: "pending", detailedStatus: "pending", category: "card", cardId: "c" }]);
+  applySlashImport(st, planFromRecords(st, hold));
+  const voided = recsFromSlashApi([{ id: "h1", date: "2026-09-05T12:00:00.000Z", description: "PHARMAPRIX", amountCents: -6063, status: "failed", detailedStatus: "canceled", category: "card", cardId: "c" }]);
+  applySlashImport(st, planFromRecords(st, voided));
+  const h = st.items.find(x => x.importId === "h1");
+  assert("a voided hold is uncounted, not duplicated", h.declined === true && h.checked === false && st.items.filter(x => x.importId === "h1").length === 1);
+  // refund of an already-imported charge is added, not paired away
+  const charge = recsFromSlashApi([{ id: "c1", date: "2026-09-02T12:00:00.000Z", description: "Wise", amountCents: -10000, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-09-02T11:00:00.000Z" }]);
+  applySlashImport(st, planFromRecords(st, charge));
+  const refundBatch = recsFromSlashApi([
+    { id: "c1", date: "2026-09-02T12:00:00.000Z", description: "Wise", amountCents: -10000, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-09-02T11:00:00.000Z" },
+    { id: "c2", date: "2026-09-04T12:00:00.000Z", description: "Wise", amountCents: 10000, status: "posted", detailedStatus: "refund", category: "card", cardId: "c" },
+  ]);
+  const p3 = planFromRecords(st, refundBatch);
+  assert("a refund of an imported charge is added", p3.pairs === 0 && p3.adds.length === 1 && p3.adds[0].kind === "in");
+  // a card hold is only superseded by a settlement within a week after it
+  const st2 = structuredClone(SEED); st2.items = []; st2.vendors = []; st2.settings = { procSeeded: true };
+  const p4 = planFromRecords(st2, recsFromSlashApi([
+    { id: "old", date: "2026-07-01T12:00:00.000Z", description: "UBER", amountCents: -4200, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-07-01T11:00:00.000Z" },
+    { id: "now", date: "2026-09-05T12:00:00.000Z", description: "UBER", amountCents: -4200, status: "pending", detailedStatus: "pending", category: "card", cardId: "c" },
+  ]));
+  assert("an old settlement doesn't swallow today's hold", p4.authSkips === 0 && p4.adds.length === 2);
+  // FX drift: a hold of 50.36 settles at 50.61 -> completes, doesn't duplicate
+  const st3 = structuredClone(SEED); st3.items = []; st3.vendors = []; st3.settings = { procSeeded: true };
+  applySlashImport(st3, planFromRecords(st3, recsFromSlashApi([{ id: "s1", date: "2026-09-05T12:00:00.000Z", description: "SUSHI SHOP", amountCents: -5036, status: "pending", detailedStatus: "pending", category: "card", cardId: "c", originalCurrency: { code: "CAD", amountCents: -6971 } }])));
+  const p5 = planFromRecords(st3, recsFromSlashApi([{ id: "s2", date: "2026-09-06T12:00:00.000Z", description: "SUSHI SHOP", amountCents: -5061, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-09-05T11:00:00.000Z", originalCurrency: { code: "CAD", amountCents: -6971 } }]));
+  applySlashImport(st3, p5);
+  assert("FX-drifted settlement completes the hold with the final amount", p5.adds.length === 0 && st3.items.length === 1 && st3.items[0].settle === "2026-09-06" && st3.items[0].usd === 50.61);
+  // groups never mix directions or declined
+  const mk = (id, kind, name, usd, declined) => ({ id, kind, date: "2026-09-01", name, usd, cadFixed: null, checked: true, accountId: null, vendorId: "v", note: "", receiptUrl: "", recurringSourceId: null, declined: !!declined });
+  const g = groupItems([mk("a", "in", "EMS", 500), mk("b", "out", "EMS", 15), mk("c", "out", "EMS", 15, true), mk("d", "out", "EMS", 20)]);
+  assert("groups split by direction and declined state", g.length === 3 && g.find(x => x.list.length === 2).list.every(x => x.kind === "out" && !x.declined));
+  // disputes are money that left
+  assert("a disputed posted charge stays settled", recsFromSlashApi([{ id: "d", date: "2026-09-01T12:00:00.000Z", description: "X", amountCents: -100, status: "posted", detailedStatus: "dispute", category: "card", cardId: "c" }])[0].status === "settled");
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

@@ -15,6 +15,7 @@ export default {
     };
     const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store" } });
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
+    if (!env.APP_TOKEN || !env.SLASH_API_KEY) return new Response("relay not configured: set APP_TOKEN and SLASH_API_KEY secrets", { status: 500, headers: cors });
     if ((req.headers.get("Authorization") || "") !== `Bearer ${env.APP_TOKEN}`) return new Response("unauthorized", { status: 401, headers: cors });
     const slash = async (path) => fetch("https://api.slash.com" + path, { headers: { "X-API-Key": env.SLASH_API_KEY, "Accept": "application/json", "User-Agent": "money-relay/1.0" } });
     const u = new URL(req.url);
@@ -52,6 +53,7 @@ export default {
           if (b.type !== "credit") { available += av; posted += po; } // a credit limit isn't cash
         }
       }
+      if (!out.length) return new Response("could not read any account balance", { status: 502, headers: cors });
       return json({ available, posted, accounts: out });
     }
 

@@ -72,7 +72,8 @@ function ensure(st){
     x.settle = x.settle ?? null; // null = untracked, "pending" = authorized not settled, ISO date = settled
     x.createdAt = x.createdAt ?? null;
     x.importId = x.importId ?? null;
-    x.declined = x.declined ?? false; x.src = x.src ?? null;
+    x.declined = x.declined ?? false;
+    if (x.src == null) x.src = x.importId ? (/\bfee\b/i.test(x.name) ? "fee" : x.cadFixed != null ? "card_settlement" : null) : null;
   });
   const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
   st.accounts.forEach((a, i) => {
@@ -339,7 +340,7 @@ function vendorStats(st, v, today){
     doneYear: sum(checked.filter(x=>x.kind===v.defaultKind && x.date.slice(0,4)===year)),
     avg: done.length ? sum(done)/done.length : 0,
     last: checked.length ? checked[0].date : null,
-    next: list.filter(x=>!x.checked).map(x=>x.date).sort()[0] || null,
+    next: list.filter(x=>!x.checked && !x.declined).map(x=>x.date).sort()[0] || null,
   };
 }
 
@@ -440,7 +441,7 @@ function goalInfo(st, g, today){
 // Walk the next N days through everything scheduled and unchecked; where does cash bottom out?
 function forecastLow(st, today, days = 30){
   const nets = dailyNets(st);
-  let bal = calc(st, today).allTime;
+  let bal = calc(st, today).end; // today's real close: no future adjustments, no future entries yet
   let overdue = 0;
   for (const [d, e] of nets) if (d >= st.startDate && d <= today) overdue += e.all - e.chk;
   let min = bal, minDate = today;
@@ -448,7 +449,7 @@ function forecastLow(st, today, days = 30){
     const d = shift(today, i);
     if (i === 1) bal += overdue;
     const e = nets.get(d);
-    bal += (e ? e.all - e.chk : 0) + ((st.adjust || {})[d] || 0);
+    bal += (e ? e.all : 0) + ((st.adjust || {})[d] || 0); // everything dated ahead is expected to land
     if (bal < min) { min = bal; minDate = d; }
   }
   return { min, date: minDate, endBalance: bal };
@@ -659,7 +660,7 @@ function pendTrayHTML(){
   const pend = s.items.filter(x => x.settle === "pending").sort((a, b) => a.date.localeCompare(b.date));
   if (!pend.length) return "";
   const notCounted = pend.filter(x => !x.checked).reduce((tt, x) => tt + (x.kind === "in" ? x.usd : -x.usd), 0);
-  return `<div class="pendlist num">
+  return `<div class="pendlist num${justOpened === "tray" ? " opening" : ""}">
     ${Math.abs(notCounted) > 0.004 ? `<div class="sub" style="padding:10px 0 4px">${fmtP(notCounted)} of this isn't counted in Left yet.</div>` : ""}
     ${pend.map(x => {
       const exp = nextBusinessDay(x.date), late = exp < t;
@@ -713,7 +714,7 @@ function monthData(st, ym, today){
   return { days, inC, outC, net: inC - outC, offset: new Date(y, m - 1, 1).getDay() };
 }
 
-const fmtWhole = n => (n < 0 ? "−" : "") + Math.abs(Math.round(n)).toLocaleString("en-US");
+const fmtWhole = n => { const r = Math.round(n); return (r < 0 ? "−" : "") + Math.abs(r).toLocaleString("en-US"); };
 const fmtWholeP = usd => fmtWhole(cadFirst() ? usd * s.rate : usd);
 
 function monthHTML(){
@@ -886,6 +887,24 @@ function mapSlashCsv(st, text){
 // Shared planner for CSV rows and live API items (same record shape).
 function planFromRecords(st, recs){
   const isDeclined = r => r.declined || !!r.decline || r.status === "declined";
+  const adds = [], updates = []; let dupes = 0;
+  // records we already hold: reconcile in place (a hold settling, a hold voided, an amount finalizing)
+  const byImport = new Map(st.items.filter(i => i.importId).map(i => [i.importId, i]));
+  for (const x of recs) {
+    const ex = byImport.get(x.id);
+    if (!ex) continue;
+    dupes++;
+    const patch = {};
+    const usd = Math.abs(x.amt);
+    if (isDeclined(x)) { if (!ex.declined) Object.assign(patch, { declined: true, checked: false, settle: null }); }
+    else {
+      if (ex.declined) Object.assign(patch, { declined: false, checked: x.status === "settled" || ex.kind === "out" });
+      if (x.status === "settled" && ex.settle === "pending") Object.assign(patch, { settle: x.dateLocal, checked: true });
+      if (Math.abs(ex.usd - usd) > 0.005) { patch.usd = usd; if (x.fcur === "CAD" && x.famt > 0) patch.cadFixed = x.famt; }
+    }
+    if (Object.keys(patch).length) updates.push({ id: ex.id, patch });
+  }
+  recs = recs.filter(r => !byImport.has(r.id));
   const declinedRecs = recs.filter(isDeclined);
   recs = recs.filter(r => !isDeclined(r));
   let pairs = 0;
@@ -900,17 +919,17 @@ function planFromRecords(st, recs){
     if (mate) { dropped.add(a.id); dropped.add(mate.id); pairs++; }
   }
   recs = recs.filter(x => !dropped.has(x.id));
-  // a card hold superseded by its settlement in the same file
+  // a card hold superseded by its own settlement in the same file (same card, same amount, within a week)
   let authSkips = 0;
   recs = recs.filter(x => {
     if (x.type !== "card_authorization") return true;
-    const hit = recs.some(b => b.type === "card_settlement" && b.last4 === x.last4 && Math.abs(b.amt - x.amt) < 0.005);
+    const hit = recs.some(b => b.type === "card_settlement" && b.last4 === x.last4 && Math.abs(b.amt - x.amt) < 0.005
+      && b.dateLocal >= x.dateLocal && dayDiff(x.dateLocal, b.dateLocal) <= 7);
     if (hit) authSkips++;
     return !hit;
   });
-  const adds = [], updates = []; let dupes = 0;
   for (const x of [...recs].reverse()) { // the export is newest-first; add oldest-first
-    if (st.items.some(i => i.importId === x.id) || updates.some(u => u.importId === x.id)) { dupes++; continue; }
+    if (updates.some(u => u.importId === x.id)) { dupes++; continue; }
     const name = cleanBankName(x.desc);
     const kind = x.amt > 0 ? "in" : "out";
     const usd = Math.abs(x.amt);
@@ -918,11 +937,19 @@ function planFromRecords(st, recs){
     const entryDate = isCard ? (x.authLocal || x.dateLocal) : x.dateLocal;
     const settled = x.status === "settled";
     if (settled) {
-      const pend = st.items.find(i => i.settle === "pending" && i.importId !== x.id
-        && i.name.toLowerCase() === name.toLowerCase() && Math.abs(i.usd - usd) < 0.01
+      // a settlement completes an earlier hold: same merchant, same money (FX may drift a few percent)
+      const close = i => Math.abs(i.usd - usd) < 0.01
+        || (i.cadFixed != null && x.fcur === "CAD" && x.famt > 0 && Math.abs(i.cadFixed - x.famt) < 0.01)
+        || Math.abs(i.usd - usd) <= usd * 0.03;
+      const pend = st.items.find(i => i.settle === "pending" && !i.declined && i.importId !== x.id
+        && i.name.toLowerCase() === name.toLowerCase() && close(i)
         && Math.abs(dayDiff(i.date, entryDate)) <= 4
         && !updates.some(u => u.id === i.id));
-      if (pend) { updates.push({ id: pend.id, settle: x.dateLocal, importId: x.id }); continue; }
+      if (pend) {
+        const patch = { settle: x.dateLocal, checked: true, importId: x.id, usd };
+        if (x.fcur === "CAD" && x.famt > 0) patch.cadFixed = x.famt;
+        updates.push({ id: pend.id, importId: x.id, patch }); continue;
+      }
     }
     if (st.items.some(i => !i.importId && i.date === entryDate && Math.abs(i.usd - usd) < 0.01 && i.name.toLowerCase() === name.toLowerCase())) { dupes++; continue; }
     adds.push({
@@ -967,7 +994,7 @@ function recsFromSlashApi(items){
   return (items || []).map(t => {
     const cat = t.category || (t.cardId ? "card" : (t.achInfo ? "ach" : (t.feeInfo ? "fee" : "")));
     const ds = String(t.detailedStatus || "").toLowerCase();
-    const status = ds === "settled" || ds === "refund" || ds === "reversed" || ds === "returned" ? "settled"
+    const status = ds === "settled" || ds === "refund" || ds === "reversed" || ds === "returned" || ds === "dispute" ? "settled"
                  : (t.status === "pending" || ds === "pending" || ds === "pending_approval" || ds === "in_review") ? "pending" : "declined";
     const isCard = cat === "card" || !!t.cardId;
     return {
@@ -1003,18 +1030,19 @@ async function syncSlash(manual, full){
     const j = await r.json();
     const plan = planFromRecords(s, recsFromSlashApi(j.items));
     const n = plan.adds.length + plan.updates.length;
-    if (n) { armUndo(structuredClone(s)); applySlashImport(s, plan); }
-    let balance = c.balance || null;
+    if (n) applySlashImport(s, plan);
+    let balance = (s.settings.slashSync || {}).balance || null;
     try {
       const rb = await fetch(`${c.url.replace(/\/+$/, "")}/balance`, { headers: { Authorization: `Bearer ${c.token}` } });
       if (rb.ok) { const b = await rb.json(); const p = pickAvailable(b); if (p) balance = { ...p, accounts: b.accounts || [], at: Date.now() }; }
     } catch {}
-    s.settings.slashSync = { ...c, balance, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} settled` : "nothing new", lastError: "" };
+    s.settings.slashSync = { ...(s.settings.slashSync || c), balance, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} updated` : "nothing new", lastError: "" };
     save();
-    if (n || manual) render();
-    if (n) toast(`Slash: ${plan.adds.length} new${plan.updates.length ? `, ${plan.updates.length} settled` : ""}`);
+    const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || "");
+    if ((n || manual) && !typing) render();
+    if (n) toast(`Slash: ${plan.adds.length} new${plan.updates.length ? `, ${plan.updates.length} updated` : ""}`);
   } catch (e) {
-    s.settings.slashSync = { ...c, lastError: String(e.message || e) };
+    s.settings.slashSync = { ...(s.settings.slashSync || c), lastError: String(e.message || e) };
     save(); if (manual) render();
   } finally { syncing = false; }
 }
@@ -1029,7 +1057,7 @@ function rebuildFromRecords(st, recs, available, today){
   let matched = 0;
   if (typeof available === "number" && dates.length) {
     const diff = available - calc(st, today).end;
-    if (Math.abs(diff) > 0.004) { st.adjust[st.startDate] = diff; matched = diff; }
+    if (Math.abs(diff) > 0.004) { st.startBudget = diff; matched = diff; }
   }
   return { count: st.items.length, declined: plan.declined || 0, startDate: st.startDate, matched };
 }
@@ -1037,7 +1065,8 @@ function rebuildFromRecords(st, recs, available, today){
 let rebuildAsk = false;
 async function rebuildFromSlash(){
   const c = s.settings.slashSync || {};
-  if (!c.url || !c.token || syncing) return;
+  if (!c.url || !c.token) { s.settings.slashSync = { ...c, lastError: "Set the relay URL and token first." }; rebuildAsk = false; save(); render(); return; }
+  if (syncing) { toast("A sync is running — try again in a moment"); return; }
   syncing = true;
   try {
     const base = c.url.replace(/\/+$/, "");
@@ -1048,7 +1077,7 @@ async function rebuildFromSlash(){
     try { const rb = await fetch(`${base}/balance`, { headers: { Authorization: `Bearer ${c.token}` } }); if (rb.ok) bal = pickAvailable(await rb.json()); } catch {}
     armUndo(structuredClone(s));
     const out = rebuildFromRecords(s, recsFromSlashApi(j.items), bal ? bal.available : null, todayISO());
-    s.settings.slashSync = { ...c, balance: bal ? { ...bal, accounts: [], at: Date.now() } : c.balance, lastSyncMs: Date.now(), lastResult: `rebuilt: ${out.count} entries`, lastError: "" };
+    s.settings.slashSync = { ...(s.settings.slashSync || c), balance: bal ? { ...bal, accounts: [], at: Date.now() } : c.balance, lastSyncMs: Date.now(), lastResult: `rebuilt: ${out.count} entries`, lastError: "" };
     rebuildAsk = false; date = todayISO(); view = "day";
     save(); render();
     toast(`Rebuilt from Slash — ${out.count} entries since ${prettyShort(out.startDate)}`);
@@ -1068,11 +1097,19 @@ function toast(text){
 function applySlashImport(st, plan){
   for (const u of plan.updates) {
     const i = st.items.find(z => z.id === u.id);
-    if (i) { i.settle = u.settle; i.importId = u.importId; i.checked = true; }
+    if (!i) continue;
+    if (u.patch) Object.assign(i, u.patch);
+    else { i.settle = u.settle; i.importId = u.importId; i.checked = true; }
   }
   for (const a of plan.adds) {
-    const v = upsertVendorFromEntry(st, a);
-    a.accountId = v.defaultAccountId ?? null;
+    if (a.importId && st.items.some(i => i.importId === a.importId)) continue; // plan went stale; never duplicate
+    if (a.declined) {
+      const v = findVendorByName(st, a.name); // declined attempts never shape a vendor's defaults
+      a.vendorId = v ? v.id : null;
+    } else {
+      const v = upsertVendorFromEntry(st, a);
+      a.accountId = v.defaultAccountId ?? null;
+    }
     st.items.push(a);
   }
   return st;
@@ -1127,14 +1164,14 @@ function rowHTML(x){
       <button class="link" data-yesterday="${x.id}" style="margin-left:6px">yesterday</button>
       <button class="link" data-again="${x.id}" style="margin-left:6px">log again today</button>
     </label>
-    <label class="sub" style="margin:0">Settlement
+    ${x.declined ? "" : `<label class="sub" style="margin:0">Settlement
       <select data-settle="${x.id}" aria-label="Settlement for ${esc(x.name)}" style="width:auto;margin-left:8px;padding:5px 8px;font-size:12.5px">
         <option value="" ${!x.settle?"selected":""}>—</option>
         <option value="pending" ${x.settle==="pending"?"selected":""}>authorized, not settled</option>
         <option value="settled" ${x.settle&&x.settle!=="pending"?"selected":""}>settled</option>
       </select>
       ${x.settle&&x.settle!=="pending"?`<input type="date" data-setdate="${x.id}" value="${x.settle}" aria-label="Settled on" style="width:auto;margin-left:6px;padding:5px 8px;font-size:12.5px;font-weight:400">`:""}
-    </label>
+    </label>`}
   </div>` : "";
   const authorized = !x.checked && x.settle === "pending";
   return `<label class="row ${x.checked?"done":""}${x.id===lastAddedId?" fresh":""}${x.declined?" declinedrow":""}" data-id="${x.id}">
@@ -1150,7 +1187,7 @@ function rowHTML(x){
 // row with the count and total; a group with something unchecked opens itself.
 function groupItems(items){
   const groups = new Map();
-  for (const x of items) { const k = x.vendorId || x.name.trim().toLowerCase(); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
+  for (const x of items) { const k = (x.vendorId || x.name.trim().toLowerCase()) + "|" + x.kind + (x.declined ? "|d" : ""); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
   return [...groups.entries()].map(([k, list]) => ({ key: k, list }));
 }
 function groupRows(items, listKey){
@@ -1160,13 +1197,17 @@ function groupRows(items, listKey){
     const pend = list.filter(x => !x.checked && !x.declined).length;
     const open = showDone[gk] !== undefined ? showDone[gk] : pend > 0;
     const total = list.reduce((t, x) => t + x.usd, 0);
+    const cadAll = list.every(x => x.cadFixed != null);
+    const cadSum = cadAll ? list.reduce((t, x) => t + x.cadFixed, 0) : null;
+    const main = cadAll && cadFirst() ? fmt(cadSum, "") : fmtPbare(total);
+    const sub = cadAll ? (cadFirst() ? fmt(total) : fmt(cadSum, "C$")) : fmtSec(total);
     const kind = list[0].kind, color = kind === "in" ? "var(--in)" : "var(--out)";
     return `<div class="row grouprow" role="button" tabindex="0" data-donetoggle="${gk}" data-cur="${open?1:0}" aria-expanded="${open?"true":"false"}">
       <span class="gbadge">${list.length}</span>
-      <div class="name">${esc(list[0].name)}<span class="notetxt">${list.length} × same merchant${pend?` · ${pend} unchecked`:""}</span></div>
-      <div class="amt num"><div class="u" style="color:${color}">${kind==="in"?"+":"−"}${fmtPbare(total)}</div><div class="c">${fmtSec(total)}</div></div>
+      <div class="name">${esc(list[0].name)}${cadAll?'<span class="tinytag">CAD</span>':""}<span class="notetxt">${list.length} × same merchant${pend?` · ${pend} unchecked`:""}</span></div>
+      <div class="amt num"><div class="u" style="color:${color}">${kind==="in"?"+":"−"}${main}</div><div class="c">${sub}</div></div>
       <svg class="pchev" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 2.5L8 6l-3.8 3.5"/></svg>
-    </div>${open ? `<div class="gsub">${list.map(rowHTML).join("")}</div>` : ""}`;
+    </div>${open ? `<div class="gsub${justOpened === gk ? " opening" : ""}">${list.map(rowHTML).join("")}</div>` : ""}`;
   }).join("");
 }
 
@@ -1238,8 +1279,8 @@ function ledgerCompress(rows){
   for (const r of rows) {
     const last = out[out.length - 1];
     const same = last && last.x.name.toLowerCase() === r.x.name.toLowerCase() && last.x.kind === r.x.kind && !!last.x.declined === !!r.x.declined && last.x.checked === r.x.checked;
-    if (same) { last.n++; last.total += r.x.usd; }
-    else out.push({ x: r.x, bal: r.bal, n: 1, total: r.x.usd });
+    if (same) { last.n++; last.total += r.x.usd; last.cadAll = last.cadAll && r.x.cadFixed != null; }
+    else out.push({ x: r.x, bal: r.bal, n: 1, total: r.x.usd, cadAll: r.x.cadFixed != null });
   }
   return out;
 }
@@ -1263,14 +1304,14 @@ function ledgerHTML(){
     + `<button class="chip${ledgerGroup?" on":""}" id="lgroup" title="Collapse runs of the same merchant"><span class="dot"></span>Group repeats</button>`;
   const head = `<div class="chips" style="margin:0 0 12px">${chips}</div>`;
   if (!rows.length) return head + '<div style="color:var(--muted)">Nothing matches.</div>';
-  const compact = ledgerGroup ? ledgerCompress(rows) : rows.map(r => ({ ...r, n: 1, total: r.x.usd }));
+  const compact = ledgerGroup ? ledgerCompress(rows) : rows.map(r => ({ ...r, n: 1, total: r.x.usd, cadAll: r.x.cadFixed != null }));
   const shown = compact.slice(0, 400);
   const status = x => x.declined ? "declined" : x.checked ? (x.settle === "pending" ? "held" : x.settle ? "settled" : "done") : (x.settle === "pending" ? "authorized" : "expected");
   return head + `<div class="ledgerwrap"><table class="ledger num">
     <thead><tr><th>Date</th><th>What</th><th>Status</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th></tr></thead>
-    <tbody>${shown.map(({ x, bal, n, total }) => `<tr class="${x.declined ? "decl" : x.checked ? "" : "pend"}">
+    <tbody>${shown.map(({ x, bal, n, total, cadAll }) => `<tr class="${x.declined ? "decl" : x.checked ? "" : "pend"}">
       <td>${prettyShort(x.date)}</td>
-      <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${n > 1 ? `<span class="gbadge" style="margin-left:7px">×${n}</span>` : ""}${x.cadFixed != null && n === 1 ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
+      <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${n > 1 ? `<span class="gbadge" style="margin-left:7px">×${n}</span>` : ""}${(n === 1 ? x.cadFixed != null : cadAll) ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
       <td class="sub" style="margin:0">${status(x)}</td>
       <td style="text-align:right;color:${x.kind === "in" ? "var(--in)" : "var(--out)"};font-weight:600">${x.kind === "in" ? "+" : "−"}${fmtPbare(total)}</td>
       <td style="text-align:right;color:${bal == null ? "var(--muted)" : bal < 0 ? "var(--out)" : "var(--ink)"}">${bal == null ? "—" : fmtPbare(bal)}</td>
@@ -1316,6 +1357,7 @@ function placeTabPills(){
 }
 let showPendTray = false;
 let sandbox = null; // snapshot of the real state while you play with what-ifs
+let justOpened = null; // which fold/tray was just toggled, so only that one animates
 let lastAddedId = null;
 function gotoDate(d){ date=d; editCarry=false; showDone={in:false,out:false,proc:false}; showPendTray=false; save(); render(); }
 
@@ -1330,6 +1372,7 @@ function render(){
   else if (view === "goals") renderGoals();
   else renderMain();
   placeTabPills();
+  justOpened = null;
   // opening a screen fades it in gently; staying on it doesn't replay the entrance
   const el = document.getElementById("app");
   if (freshView && !reduced()) {
@@ -1502,8 +1545,8 @@ function renderSettings(){
         return `<div class="recon num">
           <span>Slash available: <b>${fmtP(b.available)}</b></span>
           <span>Tracker today: <b>${fmtP(leftToday)}</b></span>
-          <span style="color:${Math.abs(diff)>0.005?"var(--out)":"var(--in)"}">Difference: <b>${fmtP(diff)}</b></span>
-          ${Math.abs(diff)>0.005?`<button class="btn btn2" id="reconBtn" style="padding:7px 12px;font-size:12px">Match Slash today</button>`:"<span>In sync.</span>"}
+          <span style="color:${Math.abs(diff)>=1?"var(--out)":"var(--in)"}">Difference: <b>${fmtP(diff)}</b></span>
+          ${Math.abs(diff)>=1?`<button class="btn btn2" id="reconBtn" style="padding:7px 12px;font-size:12px">Match Slash today</button>`:"<span>In sync.</span>"}
           <span class="sub" style="margin:0">Slash figure as of ${new Date(b.at).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}. Matching adds a start-of-day adjustment for today — never an entry.</span>
         </div>`; })()}
     </div>
@@ -1874,11 +1917,12 @@ function renderMain(){
   const sbOn = document.getElementById("sbOn");
   if (sbOn) sbOn.onclick = ()=>{ sandbox = structuredClone(s); render(); toast("Sandbox on — nothing is saved until you keep it"); };
   const sbKeep = document.getElementById("sbKeep");
-  if (sbKeep) sbKeep.onclick = ()=>{ sandbox = null; save(); render(); toast("Kept"); };
+  const dropUndo = ()=>{ if (undoBuf) { clearTimeout(undoBuf.timer); undoBuf = null; } };
+  if (sbKeep) sbKeep.onclick = ()=>{ dropUndo(); sandbox = null; save(); render(); toast("Kept"); };
   const sbDiscard = document.getElementById("sbDiscard");
-  if (sbDiscard) sbDiscard.onclick = ()=>{ s = sandbox; sandbox = null; render(); toast("Discarded — back to your real numbers"); };
+  if (sbDiscard) sbDiscard.onclick = ()=>{ dropUndo(); s = sandbox; sandbox = null; render(); toast("Discarded — back to your real numbers"); };
   const pt = document.getElementById("pendTray");
-  if (pt) pt.onclick = ()=>{ showPendTray = !showPendTray; render(); };
+  if (pt) pt.onclick = ()=>{ showPendTray = !showPendTray; justOpened = showPendTray ? "tray" : null; render(); };
   document.querySelectorAll("[data-psettle]").forEach(b=>b.onclick=()=>{
     settlePending(s, b.dataset.psettle, todayISO());
     save(); render();
@@ -2025,8 +2069,8 @@ function cadNote(kind){
   if (!el) return;
   const d = drafts[kind]; const a = parseFloat(d.amount)||0;
   if (d.cur==="CAD" && a>0) { el.hidden = false; el.textContent = `${fmt(a,"C$")} = ${fmt(a/s.rate)} today. Stays ${fmt(a,"C$")} even if the rate moves.`; return; }
-  const q = !a ? parseQuickAdd(d.name) : null;
-  if (q) { el.hidden = false; el.textContent = `Adds ${q.name} · ${q.cur==="CAD"?fmt(q.amount,"C$"):fmt(q.amount)}${q.kind?(q.kind==="in"?" · money in":" · money out"):""}${q.pending?" · authorized, not settled":""}`; return; }
+  const q = (!a || d.amountAuto) ? parseQuickAdd(d.name) : null;
+  if (q) { const c = q.cur || d.cur; el.hidden = false; el.textContent = `Adds ${q.name} · ${c==="CAD"?fmt(q.amount,"C$"):fmt(q.amount)}${q.kind?(q.kind==="in"?" · money in":" · money out"):""}${q.pending?" · authorized, not settled":""}`; return; }
   el.hidden = true; el.textContent = "";
 }
 
@@ -2034,6 +2078,15 @@ function cadNote(kind){
 function bindShared(){
   const app = document.getElementById("app");
   bindUndo();
+  app.querySelectorAll(".grouprow").forEach(g=>g.onkeydown=e=>{ if (e.key==="Enter"||e.key===" ") { e.preventDefault(); g.click(); } });
+  app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{
+    const k=b.dataset.donetoggle;
+    showDone[k] = b.dataset.cur != null ? b.dataset.cur !== "1" : !showDone[k];
+    justOpened = showDone[k] ? k : null;
+    render();
+  });
+  app.querySelectorAll("[data-lfilter]").forEach(b=>b.onclick=()=>{ ledgerFilter=b.dataset.lfilter; render(); });
+  const lg = app.querySelector("#lgroup"); if (lg) lg.onclick = ()=>{ ledgerGroup = !ledgerGroup; render(); };
   app.querySelectorAll("[data-vopen]").forEach(b=>b.onclick=()=>{ openVendorId=b.dataset.vopen; view="vendor"; render(); });
   app.querySelectorAll("[data-toggle]").forEach(c=>{
     c.indeterminate = c.hasAttribute("data-ind");
@@ -2089,7 +2142,7 @@ function bindShared(){
   app.querySelectorAll("[data-again]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
     const x = s.items.find(i=>i.id===b.dataset.again);
-    const copy = { ...x, id: uid("x"), date: todayISO(), checked: false, settle: null, createdAt: todayISO(), importId: null, recurringSourceId: null, note: "", receiptUrl: "" };
+    const copy = { ...x, id: uid("x"), date: todayISO(), checked: false, settle: null, createdAt: todayISO(), importId: null, recurringSourceId: null, note: "", receiptUrl: "", declined: false, src: null };
     s.items.push(copy); lastAddedId = copy.id;
     expandedId = null; date = todayISO(); view = "day"; save(); render();
   });
@@ -2157,6 +2210,7 @@ function bindMain(){
     const k=el.dataset.k, f=el.dataset.f;
     el.oninput = ()=>{
       drafts[k][f]=el.value;
+      if(f==="amount") drafts[k].amountAuto = false;
       if(f==="cur"||f==="amount") cadNote(k);
       if(f==="name"){
         cadNote(k);
@@ -2174,7 +2228,7 @@ function bindMain(){
         if (v && !(parseFloat(drafts[k].amount)>0)) {
           const d0 = vendorDefaults(v);
           if (d0.amount > 0) {
-            drafts[k].amount = String(d0.amount); drafts[k].cur = d0.cur;
+            drafts[k].amount = String(d0.amount); drafts[k].cur = d0.cur; drafts[k].amountAuto = true;
             const amtEl = app.querySelector(`[data-f="amount"][data-k="${k}"]`);
             const curEl = app.querySelector(`[data-f="cur"][data-k="${k}"]`);
             if (amtEl) amtEl.value = drafts[k].amount;
@@ -2211,12 +2265,7 @@ function bindMain(){
     $("carryDraft").onkeydown=e=>{ if(e.key==="Enter") doSave(); if(e.key==="Escape"){ editCarry=false; render(); } };
   }
   if ($("clearAdj")) $("clearAdj").onclick = ()=>{ delete s.adjust[date]; save(); render(); };
-  app.querySelectorAll(".grouprow").forEach(g=>g.onkeydown=e=>{ if (e.key==="Enter"||e.key===" ") { e.preventDefault(); g.click(); } });
-  app.querySelectorAll("[data-donetoggle]").forEach(b=>b.onclick=()=>{
-    const k=b.dataset.donetoggle;
-    showDone[k] = b.dataset.cur != null ? b.dataset.cur !== "1" : !showDone[k];
-    render();
-  });
+
   // drag to reorder from anywhere on the row, within the same list on the same day
   app.querySelectorAll("[data-drag]").forEach(h=>{ h.onclick = e=>e.preventDefault(); });
   app.querySelectorAll("[data-rows] .row").forEach(row=>{
@@ -2231,7 +2280,7 @@ function bindMain(){
     };
     row.ondragend = ()=>{ dragId = null; dragCont = null; app.querySelectorAll(".dragging,.drop-above,.drop-below").forEach(el=>el.classList.remove("dragging","drop-above","drop-below")); };
     row.ondragover = e=>{
-      if (!dragId || row.closest("[data-rows]")?.dataset.rows !== dragCont) return;
+      if (!dragId || !row.dataset.id || row.closest("[data-rows]")?.dataset.rows !== dragCont) return;
       e.preventDefault(); e.dataTransfer.dropEffect = "move";
       const r = row.getBoundingClientRect();
       const after = (e.clientY - r.top) > r.height / 2;
@@ -2262,8 +2311,7 @@ function bindMain(){
   };
   app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ view=b.dataset.nav; render(); });
   app.querySelectorAll("[data-allmode]").forEach(b=>b.onclick=()=>{ allMode=b.dataset.allmode; render(); });
-  app.querySelectorAll("[data-lfilter]").forEach(b=>b.onclick=()=>{ ledgerFilter=b.dataset.lfilter; render(); });
-  const lg = document.getElementById("lgroup"); if (lg) lg.onclick = ()=>{ ledgerGroup = !ledgerGroup; render(); };
+
 }
 
 // "uber 42", "chapa 2500 cad", "kurv +2000 pending" -> name, amount, currency, direction, state
@@ -2272,6 +2320,9 @@ function parseQuickAdd(text){
   if (!m || !m[1].trim()) return null;
   const amount = parseFloat(m[3].replace(/,/g, ""));
   if (!(amount > 0)) return null;
+  // a bare small number is more likely part of a name ("Terminal 3") than a price
+  const explicit = !!m[2] || !!m[4] || !!m[5] || /[.,]\d/.test(m[3]) || /\$/.test(text);
+  if (!explicit && amount < 10) return null;
   const curRaw = (m[4] || "").toLowerCase();
   return { name: m[1].trim(), amount, cur: curRaw.startsWith("c") ? "CAD" : curRaw ? "USD" : null,
            kind: m[2] === "+" ? "in" : (m[2] ? "out" : null), pending: !!m[5] };
@@ -2279,14 +2330,14 @@ function parseQuickAdd(text){
 
 function add(kind){
   const d=drafts[kind]; let a=parseFloat(d.amount)||0; let name=d.name.trim(); let cur=d.cur; let k=kind; let pending=false;
-  if (!a) { const q = parseQuickAdd(name); if (q) { name=q.name; a=q.amount; if (q.cur) cur=q.cur; if (q.kind) k=q.kind; pending=q.pending; } }
+  if (!a || d.amountAuto) { const q = parseQuickAdd(name); if (q) { name=q.name; a=q.amount; if (q.cur) cur=q.cur; if (q.kind) k=q.kind; pending=q.pending; } }
   if(!name||!a) return;
   const item = { id:uid("x"), kind:k, date, name, usd: cur==="CAD"?a/s.rate:a, cadFixed: cur==="CAD"?a:null, checked: pending ? k==="out" : false, accountId:null, vendorId:null, note:"", receiptUrl:"", recurringSourceId:null, settle: pending ? "pending" : null, createdAt: date };
   const v = upsertVendorFromEntry(s, item);
   item.accountId = v.defaultAccountId;
   s.items.push(item);
   lastAddedId = item.id;
-  drafts[kind]={name:"",amount:"",cur:d.cur};
+  drafts[kind]={name:"",amount:"",cur:d.cur,amountAuto:false};
   save(); render();
   const el=document.querySelector(`[data-f="name"][data-k="${k}"]`); if(el) el.focus();
 }
@@ -2299,7 +2350,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass, groupItems, ledgerCompress, parseQuickAdd, forecastLow, mergeVendor, recentVendors, freshState, fmtWhole };
 } else {
   s = load();
   date = s.lastDate || todayISO();
@@ -2349,11 +2400,10 @@ if (typeof window === "undefined") {
       if (view !== "all") { view = "all"; render(); }
       document.getElementById("search")?.focus();
     } else if (e.key === "t" && mainView) {
-      date = todayISO(); save(); render();
+      gotoDate(todayISO());
     } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && mainView) {
       const n = e.key === "ArrowLeft" ? -1 : 1;
-      date = view === "month" ? addMonths(date, n) : shift(date, n);
-      save(); render();
+      gotoDate(view === "month" ? addMonths(date, n) : shift(date, n));
     }
   });
 }

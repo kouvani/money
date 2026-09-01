@@ -333,3 +333,13 @@ input[type=checkbox]:active{transform:scale(.8)}
 .recent{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .chip.mini{padding:5px 10px;font-size:12px;box-shadow:none;background:var(--surface)}
 .welcome{margin:0 0 16px;padding:16px 20px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);animation:fadeUp .45s var(--ease)}
+/* only the fold that was just opened animates */
+.gsub .row{animation:none}
+.gsub.opening .row{animation:fadeUp .32s var(--ease) both}
+.pendlist .row{animation:none}
+.pendlist.opening .row{animation:fadeUp .3s var(--ease) both}
+.pendlist{animation:none}
+.pendlist.opening{animation:fadeDown .18s ease}
+.sandbar{animation:none}
+#app.viewfade .sandbar,#app.viewfade .welcome{animation:fadeUp .4s var(--ease)}
+.welcome{animation:none}
