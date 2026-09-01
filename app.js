@@ -72,6 +72,7 @@ function ensure(st){
     x.settle = x.settle ?? null; // null = untracked, "pending" = authorized not settled, ISO date = settled
     x.createdAt = x.createdAt ?? null;
     x.importId = x.importId ?? null;
+    x.declined = x.declined ?? false; x.src = x.src ?? null;
   });
   const palette = ["#1C6B5E", "#A8681C", "#6B7280", "#161C26"];
   st.accounts.forEach((a, i) => {
@@ -182,14 +183,14 @@ function calc(st, day){
   // history (visible, searchable, in vendor totals) but never move balances
   const started = x => x.date >= st.startDate;
   const carry = (day >= st.startDate ? st.startBudget : 0) + adjUpTo + st.items.filter(x=>x.checked && started(x) && x.date<day).reduce((t,x)=>t+sgn(x),0);
-  const today = st.items.filter(x=>x.date===day);
+  const today = st.items.filter(x=>x.date===day && !x.declined);
   const inT = today.filter(x=>x.kind==="in"), outT = today.filter(x=>x.kind==="out");
   const sum = (a,only) => a.filter(x=>!only||x.checked).reduce((t,x)=>t+x.usd,0);
   const inC=sum(inT,true), inA=sum(inT), outC=sum(outT,true), outA=sum(outT);
   const end = carry + inC - outC;
   const allTime = st.startBudget + adjAll + st.items.filter(x=>x.checked && started(x)).reduce((t,x)=>t+sgn(x),0);
-  const ifAll = st.startBudget + adjAll + st.items.filter(started).reduce((t,x)=>t+sgn(x),0);
-  const pendingEarlier = st.items.filter(x=>!x.checked && started(x) && x.date<day).length;
+  const ifAll = st.startBudget + adjAll + st.items.filter(x=>started(x) && !x.declined).reduce((t,x)=>t+sgn(x),0);
+  const pendingEarlier = st.items.filter(x=>!x.checked && !x.declined && started(x) && x.date<day).length;
   const dates = [...new Set(st.items.map(x=>x.date))].sort().reverse();
   return { carry,inT,outT,inC,inA,outC,outA,end,allTime,ifAll,pendingEarlier,dates };
 }
@@ -336,6 +337,7 @@ function runwayInfo(st, today){
 function dailyNets(st){
   const m = new Map();
   for (const x of st.items) {
+    if (x.declined) continue;
     const e = m.get(x.date) || { chk: 0, all: 0 };
     const v = x.kind === "in" ? x.usd : -x.usd;
     e.all += v; if (x.checked) e.chk += v;
@@ -412,7 +414,7 @@ function goalInfo(st, g, today){
 // The one most useful thing the numbers can say right now.
 function insightsFor(st, today){
   const out = [];
-  const week = st.items.filter(x => !x.checked && x.date > today && x.date <= shift(today, 7));
+  const week = st.items.filter(x => !x.checked && !x.declined && x.date > today && x.date <= shift(today, 7));
   const owed = week.filter(x => x.kind === "out").reduce((t, x) => t + x.usd, 0);
   const expIn = week.filter(x => x.kind === "in").reduce((t, x) => t + x.usd, 0);
   if (owed > 0 || expIn > 0) {
@@ -516,7 +518,7 @@ function toggleItem(st, id, today){
 }
 
 function dueMark(x, today){
-  if (x.checked || x.settle === "pending") return "";
+  if (x.checked || x.settle === "pending" || x.declined) return "";
   if (x.date < today) return '<span class="mark">overdue</span>';
   const d = dayDiff(today, x.date);
   if (d > (s?.settings?.warnDaysAhead ?? 3)) return "";
@@ -527,7 +529,7 @@ function dueMark(x, today){
 
 // The day's numbers plus what a typical day looks like (trailing 30 days from the start date).
 function daySummary(st, day){
-  const items = st.items.filter(x => x.date === day);
+  const items = st.items.filter(x => x.date === day && !x.declined);
   const chk = items.filter(x => x.checked);
   const sum = (a, k) => a.filter(x => x.kind === k).reduce((t, x) => t + x.usd, 0);
   const inC = sum(chk, "in"), outC = sum(chk, "out");
@@ -539,7 +541,7 @@ function daySummary(st, day){
   const windowDays = Math.max(1, Math.min(30, dayDiff(lo, day)));
   let n = 0, tin = 0, tout = 0;
   for (const x of st.items) {
-    if (x.date >= lo && x.date < day) { n++; if (x.checked) { if (x.kind === "in") tin += x.usd; else tout += x.usd; } }
+    if (!x.declined && x.date >= lo && x.date < day) { n++; if (x.checked) { if (x.kind === "in") tin += x.usd; else tout += x.usd; } }
   }
   const nets = dailyNets(st);
   const bars = [];
@@ -650,7 +652,7 @@ function monthData(st, ym, today){
   let inC = 0, outC = 0;
   for (let d = 1; d <= daysInMonth(y, m); d++) {
     const iso = `${y}-${pad(m)}-${pad(d)}`;
-    const todays = st.items.filter(x => x.date === iso);
+    const todays = st.items.filter(x => x.date === iso && !x.declined);
     inC += todays.filter(x => x.kind === "in" && x.checked).reduce((t, x) => t + x.usd, 0);
     outC += todays.filter(x => x.kind === "out" && x.checked).reduce((t, x) => t + x.usd, 0);
     days.push({
@@ -830,12 +832,15 @@ function mapSlashCsv(st, text){
     type: ci.type >= 0 ? (r[ci.type] || "").toLowerCase() : "", last4: ci.last4 >= 0 ? (r[ci.last4] || "") : "",
     dateLocal: utcToLocalISO(r[ci.date]), authLocal: ci.auth >= 0 ? utcToLocalISO(r[ci.auth]) : null,
     status: ci.status >= 0 ? (r[ci.status] || "").toLowerCase() : "settled", decline: ci.decline >= 0 ? (r[ci.decline] || "") : "",
-  })).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0 && !x.decline && x.status !== "declined");
+  })).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0);
   return planFromRecords(st, recs);
 }
 
 // Shared planner for CSV rows and live API items (same record shape).
 function planFromRecords(st, recs){
+  const isDeclined = r => r.declined || !!r.decline || r.status === "declined";
+  const declinedRecs = recs.filter(isDeclined);
+  recs = recs.filter(r => !isDeclined(r));
   let pairs = 0;
   // opposite rows of the same amount from the same counterparty cancel out
   const dropped = new Set();
@@ -880,10 +885,18 @@ function planFromRecords(st, recs){
       checked: settled ? true : kind === "out",
       accountId: null, vendorId: null, note: "", receiptUrl: "",
       recurringSourceId: null, settle: settled ? x.dateLocal : "pending",
-      createdAt: entryDate, importId: x.id,
+      createdAt: entryDate, importId: x.id, src: x.type || null, declined: false,
     });
   }
-  return { adds, updates, dupes, pairs, authSkips };
+  // declined and failed attempts are kept for the record, never counted
+  for (const x of [...declinedRecs].reverse()) {
+    if (st.items.some(i => i.importId === x.id)) { dupes++; continue; }
+    adds.push({ id: uid("m"), kind: x.amt > 0 ? "in" : "out", date: x.authLocal || x.dateLocal, name: cleanBankName(x.desc), usd: Math.abs(x.amt),
+      cadFixed: x.fcur === "CAD" && x.famt > 0 ? x.famt : null, checked: false, accountId: null, vendorId: null,
+      note: x.decline ? String(x.decline) : "", receiptUrl: "", recurringSourceId: null, settle: null,
+      createdAt: x.authLocal || x.dateLocal, importId: x.id, src: x.type || null, declined: true });
+  }
+  return { adds, updates, dupes, pairs, authSkips, declined: declinedRecs.length };
 }
 
 // Wipe one month of entries (and its start-of-day adjustments), e.g. to re-import it clean.
@@ -919,7 +932,15 @@ function recsFromSlashApi(items){
       dateLocal: isoToLocalISO(t.date), authLocal: isoToLocalISO(t.authorizedAt),
       status, decline: t.declineReason || "",
     };
-  }).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0 && !x.decline && x.status !== "declined");
+  }).filter(x => x.id && x.dateLocal && !isNaN(x.amt) && x.amt !== 0);
+}
+
+// Slash reports one balance per type; what you can spend is all of them together
+// (a secured charge card keeps your money as "credit", a debit account as "debit").
+function pickAvailable(b){
+  const accts = (b && b.accounts) || [];
+  if (accts.length) return { available: accts.reduce((t, a) => t + (a.available || 0), 0), posted: accts.reduce((t, a) => t + (a.posted || 0), 0) };
+  return typeof b?.available === "number" ? { available: b.available, posted: b.posted || 0 } : null;
 }
 
 // Pull new transactions through the relay and apply them quietly.
@@ -939,7 +960,7 @@ async function syncSlash(manual, full){
     let balance = c.balance || null;
     try {
       const rb = await fetch(`${c.url.replace(/\/+$/, "")}/balance`, { headers: { Authorization: `Bearer ${c.token}` } });
-      if (rb.ok) { const b = await rb.json(); if (typeof b.available === "number") balance = { available: b.available, posted: b.posted, accounts: b.accounts || [], at: Date.now() }; }
+      if (rb.ok) { const b = await rb.json(); const p = pickAvailable(b); if (p) balance = { ...p, accounts: b.accounts || [], at: Date.now() }; }
     } catch {}
     s.settings.slashSync = { ...c, balance, lastSyncMs: Date.now(), lastResult: n ? `${plan.adds.length} new, ${plan.updates.length} settled` : "nothing new", lastError: "" };
     save();
@@ -948,6 +969,44 @@ async function syncSlash(manual, full){
   } catch (e) {
     s.settings.slashSync = { ...c, lastError: String(e.message || e) };
     save(); if (manual) render();
+  } finally { syncing = false; }
+}
+
+// Replace every entry with Slash's full history and line today up with Slash's balance.
+function rebuildFromRecords(st, recs, available, today){
+  st.items = []; st.adjust = {};
+  const plan = planFromRecords(st, recs);
+  applySlashImport(st, plan);
+  const dates = st.items.filter(x => !x.declined).map(x => x.date).sort();
+  if (dates.length) { st.startDate = dates[0]; st.startBudget = 0; }
+  let matched = 0;
+  if (typeof available === "number" && dates.length) {
+    const diff = available - calc(st, today).end;
+    if (Math.abs(diff) > 0.004) { st.adjust[st.startDate] = diff; matched = diff; }
+  }
+  return { count: st.items.length, declined: plan.declined || 0, startDate: st.startDate, matched };
+}
+
+let rebuildAsk = false;
+async function rebuildFromSlash(){
+  const c = s.settings.slashSync || {};
+  if (!c.url || !c.token || syncing) return;
+  syncing = true;
+  try {
+    const base = c.url.replace(/\/+$/, "");
+    const r = await fetch(`${base}/transactions?since=0`, { headers: { Authorization: `Bearer ${c.token}` } });
+    if (!r.ok) throw new Error("relay " + r.status);
+    const j = await r.json();
+    let bal = null;
+    try { const rb = await fetch(`${base}/balance`, { headers: { Authorization: `Bearer ${c.token}` } }); if (rb.ok) bal = pickAvailable(await rb.json()); } catch {}
+    armUndo(structuredClone(s));
+    const out = rebuildFromRecords(s, recsFromSlashApi(j.items), bal ? bal.available : null, todayISO());
+    s.settings.slashSync = { ...c, balance: bal ? { ...bal, accounts: [], at: Date.now() } : c.balance, lastSyncMs: Date.now(), lastResult: `rebuilt: ${out.count} entries`, lastError: "" };
+    rebuildAsk = false; date = todayISO(); view = "day";
+    save(); render();
+    toast(`Rebuilt from Slash — ${out.count} entries since ${prettyShort(out.startDate)}`);
+  } catch (e) {
+    s.settings.slashSync = { ...c, lastError: String(e.message || e) }; rebuildAsk = false; save(); render();
   } finally { syncing = false; }
 }
 
@@ -1031,10 +1090,10 @@ function rowHTML(x){
     </label>
   </div>` : "";
   const authorized = !x.checked && x.settle === "pending";
-  return `<label class="row ${x.checked?"done":""}${x.id===lastAddedId?" fresh":""}" data-id="${x.id}">
+  return `<label class="row ${x.checked?"done":""}${x.id===lastAddedId?" fresh":""}${x.declined?" declinedrow":""}" data-id="${x.id}">
     <span class="drag" draggable="true" data-drag="${x.id}" title="Drag to reorder"><svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.2"/><circle cx="7" cy="3" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="11" r="1.2"/><circle cx="7" cy="11" r="1.2"/></svg></span>
-    <input type="checkbox" ${x.checked?"checked":""} ${authorized?'data-ind="1"':""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":authorized?"authorized, waiting to settle — check when it settles":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${dueMark(x, todayISO())}${lag?`<button class="lagchip" data-lag="${x.id}" title="This vendor usually authorizes earlier — move it there">${dayDiff(lag, x.date)===1?"yesterday?":prettyShort(lag)+"?"}</button>`:""}</div>
+    <input type="checkbox" ${x.checked?"checked":""} ${authorized?'data-ind="1"':""} ${x.declined?"disabled":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":authorized?"authorized, waiting to settle — check when it settles":"expected"}">
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}${x.note?`<span class="notetxt">${esc(x.note)}</span>`:""}${x.receiptUrl?`<a class="notetxt" style="text-decoration:underline" href="${esc(x.receiptUrl)}" target="_blank" rel="noopener">receipt</a>`:""}${x.settle==="pending"?'<span class="tinytag auth">authorized</span>':""}${x.declined?'<span class="tinytag">declined</span>':""}${dueMark(x, todayISO())}${lag?`<button class="lagchip" data-lag="${x.id}" title="This vendor usually authorizes earlier — move it there">${dayDiff(lag, x.date)===1?"yesterday?":prettyShort(lag)+"?"}</button>`:""}</div>
     <div class="amt num" data-expand="${x.id}" title="Details"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${mainAmt}</div><div class="c">${subAmt}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>${detail}`;
@@ -1091,14 +1150,31 @@ function ledgerRows(st){
 }
 
 let allMode = "days";
+let ledgerFilter = "all";
+function ledgerPass(st, x, f){
+  const isProc = () => { const v = x.vendorId && st.vendors.find(z => z.id === x.vendorId); return !!(v && v.isProcessor); };
+  switch (f) {
+    case "proc": return isProc();
+    case "cards": return String(x.src || "").startsWith("card");
+    case "fees": return x.src === "fee" || /\bfee\b/i.test(x.name);
+    case "pending": return !x.declined && (!x.checked || x.settle === "pending");
+    case "declined": return !!x.declined;
+    default: return true;
+  }
+}
 function ledgerHTML(){
-  const rows = ledgerRows(s).filter(r => matchesSearch(s, r.x, searchQ));
-  if (!rows.length) return '<div style="color:var(--muted)">Nothing matches.</div>';
+  const all = ledgerRows(s);
+  const rows = all.filter(r => ledgerPass(s, r.x, ledgerFilter) && matchesSearch(s, r.x, searchQ));
+  const count = f => all.filter(r => ledgerPass(s, r.x, f)).length;
+  const chips = [["all","All"],["proc","Processors"],["cards","Cards"],["fees","Fees"],["pending","Pending"],["declined","Declined"]]
+    .map(([k,l]) => `<button class="chip${ledgerFilter===k?" on":""}" data-lfilter="${k}"><span class="dot${k==="declined"?" warn":k==="proc"?" good":""}"></span>${l} <b>${count(k)}</b></button>`).join("");
+  const head = `<div class="chips" style="margin:0 0 12px">${chips}</div>`;
+  if (!rows.length) return head + '<div style="color:var(--muted)">Nothing matches.</div>';
   const shown = rows.slice(0, 400);
-  const status = x => x.checked ? (x.settle === "pending" ? "held" : x.settle ? "settled" : "done") : (x.settle === "pending" ? "authorized" : "expected");
-  return `<div class="ledgerwrap"><table class="ledger num">
+  const status = x => x.declined ? "declined" : x.checked ? (x.settle === "pending" ? "held" : x.settle ? "settled" : "done") : (x.settle === "pending" ? "authorized" : "expected");
+  return head + `<div class="ledgerwrap"><table class="ledger num">
     <thead><tr><th>Date</th><th>What</th><th>Status</th><th style="text-align:right">Amount</th><th style="text-align:right">Balance</th></tr></thead>
-    <tbody>${shown.map(({ x, bal }) => `<tr class="${x.checked ? "" : "pend"}">
+    <tbody>${shown.map(({ x, bal }) => `<tr class="${x.declined ? "decl" : x.checked ? "" : "pend"}">
       <td>${prettyShort(x.date)}</td>
       <td><button class="namebtn" data-vopen-item="${x.id}">${esc(x.name)}</button>${x.cadFixed != null ? '<span class="tinytag">CAD</span>' : ""}${x.recurringSourceId ? RMARK : ""}</td>
       <td class="sub" style="margin:0">${status(x)}</td>
@@ -1299,6 +1375,12 @@ function renderSettings(){
         <button class="link" id="ssFull" style="margin-left:0">Pull my full Slash history</button>
         <span class="sub" style="margin:0">Everything, once. Days before your start date become history that never moves your balance.</span>
       </div>
+      <div style="margin-top:12px">
+        ${rebuildAsk
+          ? `<div class="runway low" style="margin:0 0 8px">This replaces every entry with Slash's complete history — settled, pending, and declined — sets your start to the first transaction, and lines today up with Slash's balance. Vendors, accounts, and goals stay. Undo has you for 6 seconds.</div>
+             <div style="display:flex;gap:8px;align-items:center"><button class="btn" id="rebuildGo">Rebuild from Slash</button><button class="link" id="rebuildNo" style="margin-left:0">cancel</button></div>`
+          : `<button class="btn btn2" id="rebuildAskBtn">Rebuild everything from Slash</button><span class="sub" style="margin-left:10px">The clean slate: no duplicates, no leftover gaps.</span>`}
+      </div>
       ${s.settings.slashSync?.lastSyncMs?`<div class="sub" style="margin-top:8px">Last sync ${new Date(s.settings.slashSync.lastSyncMs).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})} · ${esc(s.settings.slashSync.lastResult||"")}</div>`:""}
       ${s.settings.slashSync?.lastError?`<div class="runway low" style="margin-top:6px">Couldn't sync: ${esc(s.settings.slashSync.lastError)}</div>`:""}
       ${(()=>{ const b = s.settings.slashSync?.balance; if (!b) return "";
@@ -1354,6 +1436,9 @@ function renderSettings(){
   document.getElementById("ssTok").onchange = ssSave;
   document.getElementById("ssSync").onclick = ()=>{ ssSave(); syncSlash(true); };
   document.getElementById("ssFull").onclick = ()=>{ ssSave(); syncSlash(true, true); };
+  const ra = document.getElementById("rebuildAskBtn"); if (ra) ra.onclick = ()=>{ ssSave(); rebuildAsk = true; render(); };
+  const rn = document.getElementById("rebuildNo"); if (rn) rn.onclick = ()=>{ rebuildAsk = false; render(); };
+  const rg = document.getElementById("rebuildGo"); if (rg) rg.onclick = ()=>{ ssSave(); rebuildFromSlash(); };
   const rb = document.getElementById("reconBtn");
   if (rb) rb.onclick = ()=>{
     const b = s.settings.slashSync?.balance; if (!b) return;
@@ -1596,7 +1681,9 @@ function renderMain(){
         <div class="pgrid">${cards}</div>
       </div>`;
     }
-    body = `${procBlock}<div class="cols">${listHTML("in", inO)}${listHTML("out", outO)}</div>`;
+    const declinedT = s.items.filter(x => x.date === date && x.declined);
+    const declBlock = declinedT.length ? `<div class="declbox"><button class="donebar num" data-donetoggle="decl" aria-expanded="${showDone.decl?"true":"false"}">${declinedT.length} declined ${declinedT.length===1?"attempt":"attempts"} · ${fmtP(-declinedT.reduce((t,x)=>t+x.usd,0))} never left<span class="tinylink">${showDone.decl?"hide":"show"}</span></button>${showDone.decl?declinedT.map(rowHTML).join(""):""}</div>` : "";
+    body = `${procBlock}<div class="cols">${listHTML("in", inO)}${listHTML("out", outO)}</div>${declBlock}`;
   } else if (view==="month") {
     body = monthHTML();
   } else {
@@ -2023,6 +2110,7 @@ function bindMain(){
   };
   app.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{ view=b.dataset.nav; render(); });
   app.querySelectorAll("[data-allmode]").forEach(b=>b.onclick=()=>{ allMode=b.dataset.allmode; render(); });
+  app.querySelectorAll("[data-lfilter]").forEach(b=>b.onclick=()=>{ ledgerFilter=b.dataset.lfilter; render(); });
 }
 
 function add(kind){
@@ -2046,7 +2134,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass };
 } else {
   s = load();
   date = s.lastDate || todayISO();

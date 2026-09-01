@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, nextBusinessDay, settlePending, daySummary, dayBriefText, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth, planFromRecords, recsFromSlashApi, isoToLocalISO, ledgerRows, pickAvailable, rebuildFromRecords, ledgerPass } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -493,7 +493,7 @@ const round2 = n => Math.round(n * 100) / 100;
     { id: "tx_d", date: "2026-09-01T12:07:00.000Z", description: "NOPE", amountCents: -100, status: "failed", detailedStatus: "declined", category: "card", cardId: "c_1", declineReason: "insufficient" },
   ];
   const recs = recsFromSlashApi(items);
-  assert("declined items are dropped", recs.length === 3);
+  assert("declined items are kept but flagged", recs.length === 4 && recs.filter(r => r.status === "declined").length === 1);
   const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true };
   const plan = planFromRecords(st, recs);
   const credit = plan.adds.find(a => a.importId === "tx_a"), sushi = plan.adds.find(a => a.importId === "tx_b"), hold = plan.adds.find(a => a.importId === "tx_c");
@@ -517,6 +517,35 @@ const round2 = n => Math.round(n * 100) / 100;
   const after = id => rows.find(r => r.x.id === id).bal;
   assert("balance after each checked row matches calc for that day", Math.round(after("l1")*100)/100 === Math.round(calc(st, "2026-09-02").end*100)/100 && Math.round(after("o2")*100)/100 === Math.round(calc(st, "2026-08-31").end*100)/100);
   assert("adjustments land in the running balance", Math.round(after("l1")*100)/100 === 8758.01);
+}
+
+// 27. Declined attempts are kept but never counted; balance picks every Slash balance type; rebuild lines up with Slash
+{
+  assert("charge-card balance = cash + credit", pickAvailable({ available: 0, accounts: [{ type: "cash", available: 0, posted: 0 }, { type: "credit", available: 4504.46, posted: 4558.62 }] }).available === 4504.46);
+  assert("plain debit balance still works", pickAvailable({ available: 120, posted: 100, accounts: [] }).available === 120);
+
+  const items = [
+    { id: "d1", date: "2026-09-01T12:00:00.000Z", description: "CHARGEBLAST", amountCents: -154500, status: "failed", detailedStatus: "declined", category: "card", cardId: "c_1", declineReason: "insufficient_funds" },
+    { id: "d2", date: "2026-09-01T12:01:00.000Z", description: "Incoming ACH credit from EMS", amountCents: 18995, status: "posted", detailedStatus: "settled", category: "ach", achInfo: {} },
+  ];
+  const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true }; st.startDate = "2026-09-01";
+  const plan = planFromRecords(st, recsFromSlashApi(items));
+  assert("declined lines are planned as flagged entries", plan.adds.length === 2 && plan.declined === 1 && plan.adds.some(x => x.declined && x.name === "CHARGEBLAST" && x.note === "insufficient_funds"));
+  applySlashImport(st, plan);
+  const m = calc(st, "2026-09-01");
+  assert("declined never touches the day or the balance", m.outA === 0 && m.inC === 189.95 && Math.round(m.end*100)/100 === Math.round((8403.01 + 189.95)*100)/100 && m.pendingEarlier === 0);
+  assert("declined shows up under its own ledger filter only", st.items.filter(x => ledgerPass(st, x, "declined")).length === 1 && st.items.filter(x => ledgerPass(st, x, "pending")).length === 0);
+  assert("month view ignores declined", monthData(st, "2026-09", "2026-09-02").days[0].hasOut === false);
+
+  // rebuild: start at the first transaction, start budget 0, today lined up with Slash's balance
+  const st2 = structuredClone(SEED); st2.vendors = []; st2.settings = { procSeeded: true };
+  const recs = recsFromSlashApi([
+    { id: "r1", date: "2026-08-20T12:00:00.000Z", description: "Incoming ACH credit from EMS", amountCents: 500000, status: "posted", detailedStatus: "settled", category: "ach" },
+    { id: "r2", date: "2026-08-25T12:00:00.000Z", description: "Wise", amountCents: -100000, status: "posted", detailedStatus: "settled", category: "card", cardId: "c", authorizedAt: "2026-08-25T11:00:00.000Z" },
+  ]);
+  const out = rebuildFromRecords(st2, recs, 4504.46, "2026-09-01");
+  assert("rebuild replaces everything and starts at the first transaction", st2.items.length === 2 && st2.startDate === "2026-08-20" && st2.startBudget === 0 && Object.keys(st2.adjust).length === 1);
+  assert("after rebuild today's Left equals Slash", Math.round(calc(st2, "2026-09-01").end*100)/100 === 4504.46 && Math.round(out.matched*100)/100 === 504.46);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
