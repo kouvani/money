@@ -51,6 +51,7 @@ function ensure(st){
   st.vendors.forEach(v => {
     v.note = v.note ?? ""; v.url = v.url ?? ""; v.cadence = v.cadence ?? null;
     v.dayOfMonth = v.dayOfMonth ?? null; v.defaultAccountId = v.defaultAccountId ?? null;
+    v.skipDates = v.skipDates ?? [];
   });
   st.items.forEach(x => {
     x.cadFixed = x.cadFixed ?? null; x.accountId = x.accountId ?? null; x.vendorId = x.vendorId ?? null;
@@ -72,6 +73,7 @@ function load(){
 let s, date;
 let view = "day";
 let openVendorId = null;
+let deleteAsk = null;
 let editStart = false;
 let showRate = false;
 const drafts = { in:{name:"",amount:"",cur:"USD"}, out:{name:"",amount:"",cur:"USD"} };
@@ -106,7 +108,7 @@ function upsertVendorFromEntry(st, item){
   let v = findVendorByName(st, item.name);
   if (!v) {
     v = { id: uid("v"), name: item.name.trim(), note: "", defaultKind: item.kind, defaultAccountId: item.accountId ?? null,
-          defaultAmountUsd: item.usd, cadFixed: item.cadFixed, cadence: null, dayOfMonth: null, url: "" };
+          defaultAmountUsd: item.usd, cadFixed: item.cadFixed, cadence: null, dayOfMonth: null, url: "", skipDates: [] };
     st.vendors.push(v);
   } else {
     v.defaultKind = item.kind;
@@ -116,6 +118,68 @@ function upsertVendorFromEntry(st, item){
   }
   item.vendorId = v.id;
   return v;
+}
+
+// ---- recurring ----
+
+const daysInMonth = (y, m) => new Date(y, m, 0).getDate(); // m is 1-based
+function addMonths(iso, n, day){
+  const [y, m, d] = iso.split("-").map(Number);
+  const total = (m - 1) + n;
+  const y2 = y + Math.floor(total / 12), m2 = (total % 12 + 12) % 12 + 1;
+  const d2 = Math.min(day ?? d, daysInMonth(y2, m2));
+  return `${y2}-${pad(m2)}-${pad(d2)}`;
+}
+
+// A vendor with a cadence generates expected entries: from its latest entry
+// forward, through the viewed date, at most 12 months ahead of today.
+function generateRecurring(st, today, through){
+  let horizon = addMonths(today, 3);
+  if (through && through > horizon) horizon = through;
+  const cap = addMonths(today, 12);
+  if (horizon > cap) horizon = cap;
+  let changed = 0;
+  for (const v of st.vendors) {
+    if (!v.cadence) continue;
+    v.skipDates = v.skipDates || [];
+    const amountUsd = v.cadFixed != null ? v.cadFixed / st.rate : v.defaultAmountUsd;
+    if (!(amountUsd > 0)) continue;
+    const mine = st.items.filter(x => x.vendorId === v.id).map(x => x.date).sort();
+    const anchor = mine.length ? mine[mine.length - 1] : today;
+    const dom = v.dayOfMonth ?? Number(anchor.slice(8, 10));
+    const next = d => {
+      if (v.cadence === "weekly") return shift(d, 7);
+      if (v.cadence === "yearly") return addMonths(d, 12, Number(anchor.slice(8, 10)));
+      return addMonths(d, 1, dom);
+    };
+    const taken = new Set(st.items.filter(x => x.vendorId === v.id).map(x => x.date));
+    // first occurrence: the cadence day in the anchor's own month still counts if it's ahead
+    let d = next(anchor), guard = 0;
+    if (v.cadence === "monthly") {
+      const sameMonth = addMonths(anchor, 0, dom);
+      if (sameMonth > anchor) d = sameMonth;
+    }
+    while (d <= horizon && guard++ < 400) {
+      if (!taken.has(d) && !v.skipDates.includes(d)) {
+        st.items.push({ id: uid("r"), kind: v.defaultKind, date: d, name: v.name,
+          usd: v.cadFixed != null ? v.cadFixed / st.rate : v.defaultAmountUsd,
+          cadFixed: v.cadFixed, checked: false, accountId: v.defaultAccountId,
+          vendorId: v.id, note: "", receiptUrl: "", recurringSourceId: v.id });
+        taken.add(d);
+        changed++;
+      }
+      d = next(d);
+    }
+  }
+  return changed;
+}
+
+// Stop a vendor's cadence and drop its still-unchecked generated entries from a date on.
+function stopRecurring(st, v, fromDate){
+  v.cadence = null;
+  const before = st.items.length;
+  st.items = st.items.filter(x => !(x.recurringSourceId === v.id && !x.checked && x.date >= fromDate));
+  return before - st.items.length;
 }
 
 function vendorDefaults(v){
@@ -147,13 +211,24 @@ function vendorStats(st, v, today){
 
 // ---- rows ----
 
+const RMARK = `<svg class="rmark" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Repeats"><path d="M10.2 6A4.2 4.2 0 1 1 8.9 2.9"/><path d="M9.2 0.9l0.4 2.2-2.2 0.4"/></svg>`;
+
 function rowHTML(x){
+  if (deleteAsk === x.id) {
+    return `<div class="row askrow" data-id="${x.id}">
+      <div class="name" style="white-space:normal">Delete ${esc(x.name)}?
+        <button class="link" data-del-one="${x.id}" style="margin-left:10px">just this one</button>
+        <button class="link" data-del-stop="${x.id}">stop repeating</button>
+        <button class="link" data-del-cancel="${x.id}">keep it</button>
+      </div>
+    </div>`;
+  }
   const color = x.kind==="in" ? "var(--in)" : "var(--out)";
   const sign = x.kind==="in" ? "+" : "−";
   const cad = x.cadFixed!=null ? x.cadFixed : x.usd*s.rate;
   return `<label class="row ${x.checked?"done":""}" data-id="${x.id}">
     <input type="checkbox" ${x.checked?"checked":""} style="accent-color:${color}" data-toggle="${x.id}" aria-label="${esc(x.name)} ${x.checked?"done":"expected"}">
-    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}</div>
+    <div class="name"><button class="namebtn" data-vopen-item="${x.id}" title="Open vendor">${esc(x.name)}</button>${x.recurringSourceId?RMARK:""}${x.cadFixed!=null?'<span class="tinytag">CAD</span>':""}</div>
     <div class="amt num"><div class="u" style="color:${x.checked?"var(--muted)":color}">${sign}${fmt(x.usd,"")}</div><div class="c">${fmt(cad,"C$")}</div></div>
     <button class="x" data-remove="${x.id}" title="Remove" aria-label="Remove ${esc(x.name)}">×</button>
   </label>`;
@@ -188,6 +263,7 @@ function groupedItemsHTML(list){
 // ---- views ----
 
 function render(){
+  if (generateRecurring(s, todayISO(), shift(date, 32)) > 0) save();
   if (view === "vendor") return renderVendor();
   if (view === "vendors") return renderVendors();
   renderMain();
@@ -273,12 +349,43 @@ function renderVendor(){
       <input id="vNote" value="${esc(v.note)}" placeholder="Note" aria-label="Vendor note">
       <input id="vUrl" value="${esc(v.url)}" placeholder="Link (billing page, dashboard)" aria-label="Vendor link">
     </div>
+    <div class="cadrow num">
+      <span>Repeats</span>
+      <select id="vCadence" aria-label="Repeats">
+        <option value="" ${!v.cadence?"selected":""}>never</option>
+        <option value="weekly" ${v.cadence==="weekly"?"selected":""}>weekly</option>
+        <option value="monthly" ${v.cadence==="monthly"?"selected":""}>monthly</option>
+        <option value="yearly" ${v.cadence==="yearly"?"selected":""}>yearly</option>
+      </select>
+      ${v.cadence==="monthly"?`<span>on day</span><input id="vDay" type="number" min="1" max="31" value="${v.dayOfMonth??""}" aria-label="Day of month" style="width:64px">`:""}
+      ${v.cadence?`<span class="sub" style="margin:0">Bills appear unchecked on their day. Delete one to skip it.</span>`:""}
+    </div>
     ${v.url?`<div class="sub" style="margin-bottom:10px"><a href="${esc(v.url)}" target="_blank" rel="noopener" class="quietlink">open link</a></div>`:""}
     <div style="margin-top:26px">${list.length?groupedItemsHTML(list):'<div class="empty">Nothing logged yet.</div>'}</div>`;
   bindShared();
   document.getElementById("back").onclick = ()=>{ view="day"; render(); };
   document.getElementById("vNote").oninput = e=>{ v.note = e.target.value; save(); };
   document.getElementById("vUrl").onchange = e=>{ v.url = e.target.value.trim(); save(); render(); };
+  document.getElementById("vCadence").onchange = e=>{
+    const c = e.target.value || null;
+    if (!c) { stopRecurring(s, v, shift(todayISO(), 1)); }
+    else {
+      v.cadence = c;
+      if (c === "monthly" && v.dayOfMonth == null) {
+        const mine = vendorItems(s, v);
+        v.dayOfMonth = Number((mine[0]?.date || todayISO()).slice(8, 10));
+      }
+    }
+    save(); render();
+  };
+  const vDay = document.getElementById("vDay");
+  if (vDay) vDay.onchange = e=>{
+    const n = Math.min(31, Math.max(1, parseInt(e.target.value, 10) || 1));
+    v.dayOfMonth = n;
+    // regenerate on the new day: drop untouched future generated entries first
+    const c = v.cadence; stopRecurring(s, v, shift(todayISO(), 1)); v.cadence = c;
+    save(); render();
+  };
 }
 
 function renderVendors(){
@@ -312,7 +419,28 @@ function cadNote(kind){
 function bindShared(){
   const app = document.getElementById("app");
   app.querySelectorAll("[data-toggle]").forEach(c=>c.onchange=()=>{ const x=s.items.find(i=>i.id===c.dataset.toggle); x.checked=!x.checked; save(); render(); });
-  app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{ e.preventDefault(); s.items=s.items.filter(i=>i.id!==b.dataset.remove); save(); render(); });
+  app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=e=>{
+    e.preventDefault();
+    const x = s.items.find(i=>i.id===b.dataset.remove);
+    const v = x && x.recurringSourceId ? s.vendors.find(z=>z.id===x.recurringSourceId) : null;
+    if (v && v.cadence) { deleteAsk = x.id; render(); return; }
+    s.items=s.items.filter(i=>i.id!==b.dataset.remove); save(); render();
+  });
+  app.querySelectorAll("[data-del-one]").forEach(b=>b.onclick=()=>{
+    const x = s.items.find(i=>i.id===b.dataset.delOne);
+    const v = s.vendors.find(z=>z.id===x.recurringSourceId);
+    if (v && !v.skipDates.includes(x.date)) v.skipDates.push(x.date);
+    s.items = s.items.filter(i=>i.id!==x.id);
+    deleteAsk = null; save(); render();
+  });
+  app.querySelectorAll("[data-del-stop]").forEach(b=>b.onclick=()=>{
+    const x = s.items.find(i=>i.id===b.dataset.delStop);
+    const v = s.vendors.find(z=>z.id===x.recurringSourceId);
+    if (v) stopRecurring(s, v, x.date);
+    s.items = s.items.filter(i=>i.id!==x.id);
+    deleteAsk = null; save(); render();
+  });
+  app.querySelectorAll("[data-del-cancel]").forEach(b=>b.onclick=()=>{ deleteAsk = null; render(); });
   app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{ date=b.dataset.open; view="day"; save(); render(); });
   app.querySelectorAll("[data-vopen-item]").forEach(b=>b.onclick=e=>{
     e.preventDefault();
@@ -387,7 +515,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths };
 } else {
   s = load();
   date = s.lastDate || todayISO();

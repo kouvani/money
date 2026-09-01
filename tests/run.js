@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats } = require(path.join(root, "app.js"));
+const { SEED, migrate, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -71,6 +71,48 @@ const round2 = n => Math.round(n * 100) / 100;
   const cadVendor = upsertVendorFromEntry(st, { id: "a3", kind: "out", date: "2026-08-31", name: "Chapa - rent", usd: 2500/1.389, cadFixed: 2500, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
   assert("CAD-locked vendor prefills in CAD", vendorDefaults(cadVendor).amount === 2500 && vendorDefaults(cadVendor).cur === "CAD");
   assert("lookup by name works", findVendorByName(st, "  CHARGEBLAST ") === v1);
+}
+
+// 6. Recurring bills: generated on their day, no duplicates, deletable one-by-one, capped
+{
+  const st = structuredClone(SEED);
+  st.items = []; st.vendors = [];
+  const bill = { id: "b1", kind: "out", date: "2026-08-27", name: "Regus", usd: 850, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null };
+  const v = upsertVendorFromEntry(st, bill); st.items.push(bill);
+  v.cadence = "monthly"; v.dayOfMonth = 27; v.skipDates = [];
+  const made = generateRecurring(st, "2026-09-01", null);
+  const gen = st.items.filter(x => x.recurringSourceId === v.id);
+  assert("monthly bill generates on its day", made >= 3 && gen.every(x => x.date.slice(8) === "27"));
+  assert("first generated occurrence is the next month", gen.map(x=>x.date).sort()[0] === "2026-09-27");
+  assert("generated entries are normal unchecked entries", gen.every(x => !x.checked && x.usd === 850 && x.kind === "out"));
+  assert("regeneration never duplicates", generateRecurring(st, "2026-09-01", null) === 0);
+  assert("never generates more than 12 months ahead", gen.every(x => x.date <= addMonths("2026-09-01", 12)));
+  // delete just one: skipDates keeps it gone
+  const skip = gen[0];
+  v.skipDates.push(skip.date);
+  st.items = st.items.filter(x => x.id !== skip.id);
+  assert("a deleted occurrence stays deleted", generateRecurring(st, "2026-09-01", null) === 0);
+  // stop generating: cadence off, future unchecked gone, checked history kept
+  gen[1].checked = true;
+  stopRecurring(st, v, "2026-09-01");
+  assert("stop repeating clears future unchecked, keeps history", v.cadence === null
+    && st.items.filter(x => x.recurringSourceId === v.id && !x.checked).length === 0
+    && st.items.includes(gen[1]) && st.items.includes(bill));
+  // the cadence day later in the anchor's own month still counts
+  const vSoon = upsertVendorFromEntry(st, { id: "c1", kind: "out", date: "2026-09-01", name: "Chargeblast", usd: 300, cadFixed: null, checked: false, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push({ id: "c1e", kind: "out", date: "2026-09-01", name: "Chargeblast", usd: 300, cadFixed: null, checked: false, accountId: null, vendorId: vSoon.id, note: "", receiptUrl: "", recurringSourceId: null });
+  vSoon.cadence = "monthly"; vSoon.dayOfMonth = 27;
+  generateRecurring(st, "2026-09-01", null);
+  assert("cadence day in the anchor month generates too", st.items.some(x => x.recurringSourceId === vSoon.id && x.date === "2026-09-27"));
+
+  // month-length clamp: day 31 in a 30-day month
+  const v31 = upsertVendorFromEntry(st, { id: "b2", kind: "out", date: "2026-08-31", name: "Landlord", usd: 1200, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
+  st.items.push(st.items.pop()); // no-op keep
+  v31.cadence = "monthly"; v31.dayOfMonth = 31; v31.skipDates = [];
+  st.items.push({ id: "b2e", kind: "out", date: "2026-08-31", name: "Landlord", usd: 1200, cadFixed: null, checked: true, accountId: null, vendorId: v31.id, note: "", receiptUrl: "", recurringSourceId: null });
+  generateRecurring(st, "2026-09-01", null);
+  const land = st.items.filter(x => x.recurringSourceId === v31.id).map(x => x.date).sort();
+  assert("day 31 clamps to shorter months", land.includes("2026-09-30") && land.includes("2026-10-31") && land.includes("2026-11-30"));
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk

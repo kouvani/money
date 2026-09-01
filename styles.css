@@ -54,6 +54,10 @@ button{cursor:pointer}
 .tinylink{font-size:11px;color:var(--muted);margin-left:8px;text-decoration:underline;font-weight:400}
 .quietlink{color:var(--muted);font-size:12.5px}
 .vfields{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:16px 0 6px}
+.rmark{margin-left:7px;color:var(--muted);vertical-align:-1px}
+.cadrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 6px;font-size:12.5px;color:var(--muted)}
+.cadrow select,.cadrow input{width:auto;padding:6px 8px;font-size:12.5px}
+.askrow{cursor:default}
 @media (max-width:640px){.vfields{grid-template-columns:1fr}}
 .addrow{border-top:1px solid var(--line);padding-top:12px}
 .addgrid{display:grid;grid-template-columns:1fr 96px 68px auto;gap:6px}
