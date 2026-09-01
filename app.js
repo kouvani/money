@@ -389,8 +389,8 @@ function sparkSVG(sd, today, wide){
   const dashed = [sd.past[sd.past.length - 1], ...sd.future].map((v, i) => `${X(sd.past.length - 1 + i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
   const color = sd.past[sd.past.length - 1] >= sd.past[0] ? "var(--in)" : "var(--out)";
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" fill="none" role="img" aria-label="Balance over the last 30 days and the week ahead">
-    <polyline points="${solid}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
-    <polyline points="${dashed}" stroke="var(--muted)" stroke-width="1.3" stroke-dasharray="3 3" stroke-linejoin="round" stroke-linecap="round" opacity=".75"/>
+    <polyline class="spark-line" pathLength="1" points="${solid}" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <polyline class="spark-future" points="${dashed}" stroke="var(--muted)" stroke-width="1.3" stroke-dasharray="3 3" stroke-linejoin="round" stroke-linecap="round" opacity=".75"/>
     <circle cx="${X(sd.past.length-1).toFixed(1)}" cy="${Y(sd.past[sd.past.length-1]).toFixed(1)}" r="2.4" fill="${color}"/>
     ${today ? all.map((v, i) => { const d = i < sd.past.length ? shift(today, -(sd.past.length - 1 - i)) : shift(today, i - sd.past.length + 1);
       return `<circle class="spot" cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="5" fill="transparent"><title>${prettyShort(d)} · ${fmtP(v)}${i >= sd.past.length ? " (projected)" : ""}</title></circle>`; }).join("") : ""}
@@ -452,10 +452,10 @@ function paintNum(id, val, fmtFn){
   el.textContent = fmtFn(val);
   if (from == null || from === val || reduced() || lastAnimDate !== date) return;
   if (id === "numLeft") { const cell = el.closest(".cell"); if (cell) { cell.classList.add(val > from ? "pulse-up" : "pulse-down"); } }
-  const t0 = performance.now(), dur = 420;
+  const t0 = performance.now(), dur = 640;
   const tick = now => {
     if (document.getElementById(id) !== el) return;
-    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 5);
     el.textContent = fmtFn(from + (val - from) * e);
     if (p < 1) requestAnimationFrame(tick); else el.textContent = fmtFn(val);
   };
@@ -577,7 +577,7 @@ function weekBarsSVG(sm){
     const y = b.net >= 0 ? mid - hh : mid;
     const col = b.net >= 0 ? "var(--in)" : "var(--out)";
     const wd = new Date(b.date + "T00:00").toLocaleDateString("en-US", { weekday: "narrow" });
-    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${col}" opacity="${b.date === date ? 1 : .45}"><title>${prettyShort(b.date)} · ${fmtP(b.net)}</title></rect>
+    return `<rect class="wbar${b.net < 0 ? " wbar-neg" : ""}" style="--i:${i}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" rx="2" fill="${col}" opacity="${b.date === date ? 1 : .45}"><title>${prettyShort(b.date)} · ${fmtP(b.net)}</title></rect>
       <text x="${(x + bw / 2).toFixed(1)}" y="${h - 2}" text-anchor="middle" font-size="9" fill="var(--muted)">${wd}</text>`;
   }).join("");
   return `<svg class="week-bars" viewBox="0 0 ${w} ${h}" role="img" aria-label="Net per day, last 7 days"><line x1="0" x2="${w}" y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="1"/>${bars}</svg>`;
@@ -1239,6 +1239,25 @@ function groupedItemsHTML(list){
 // ---- views ----
 
 let lastRenderedView = null;
+const tabPos = {};
+// After each render, slide the highlight pill to the active tab instead of swapping it.
+function placeTabPills(){
+  document.querySelectorAll(".tabs").forEach((box, i) => {
+    const on = box.querySelector(".tab.on");
+    if (!on) return;
+    let pill = box.querySelector(".tabind");
+    if (!pill) { pill = document.createElement("span"); pill.className = "tabind"; pill.setAttribute("aria-hidden", "true"); box.prepend(pill); }
+    const key = [...box.querySelectorAll(".tab")].map(t => t.textContent.trim()).join("|");
+    const to = { left: on.offsetLeft, width: on.offsetWidth };
+    const from = tabPos[key];
+    pill.style.left = to.left + "px"; pill.style.width = to.width + "px";
+    if (from && !reduced() && (from.left !== to.left || from.width !== to.width) && pill.animate) {
+      pill.animate([{ left: from.left + "px", width: from.width + "px" }, { left: to.left + "px", width: to.width + "px" }],
+        { duration: 380, easing: "cubic-bezier(.2,.8,.2,1)" });
+    }
+    tabPos[key] = to;
+  });
+}
 let showPendTray = false;
 let sandbox = null; // snapshot of the real state while you play with what-ifs
 let lastAddedId = null;
@@ -1254,6 +1273,7 @@ function render(){
   else if (view === "settings") renderSettings();
   else if (view === "goals") renderGoals();
   else renderMain();
+  placeTabPills();
   // opening a screen fades it in gently; staying on it doesn't replay the entrance
   const el = document.getElementById("app");
   if (freshView && !reduced()) {
