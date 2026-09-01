@@ -742,6 +742,14 @@ function mapSlashCsv(st, text){
   return { adds, updates, dupes, pairs, authSkips };
 }
 
+// Wipe one month of entries (and its start-of-day adjustments), e.g. to re-import it clean.
+function deleteMonth(st, ym){
+  const before = st.items.length;
+  st.items = st.items.filter(x => !x.date.startsWith(ym));
+  for (const d of Object.keys(st.adjust || {})) if (d.startsWith(ym)) delete st.adjust[d];
+  return before - st.items.length;
+}
+
 function applySlashImport(st, plan){
   for (const u of plan.updates) {
     const i = st.items.find(z => z.id === u.id);
@@ -955,6 +963,7 @@ let pendingImport = null;
 let importError = false;
 let pendingCsv = null;
 let csvError = false;
+let wipeMsg = "";
 let undoBuf = null;
 
 function applyTheme(){
@@ -1031,6 +1040,15 @@ function renderSettings(){
         </div>`:""}
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="sub" style="margin:0" for="wipeMonth">Delete a whole month of entries</label>
+        <input type="month" id="wipeMonth" style="width:auto;font-size:12.5px;font-weight:400" aria-label="Month to delete">
+        <button class="btn btn2" id="wipeBtn">Delete that month</button>
+        ${wipeMsg?`<span class="sub" style="margin:0">${wipeMsg}</span>`:""}
+      </div>
+      <div class="sub" style="margin-top:8px">For re-importing a month clean. Undo has your back for 6 seconds.</div>
+    </div>
+    <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <label class="sub" style="margin:0">Due-soon marks show
         <input id="warnDays" type="number" min="0" max="30" value="${s.settings.warnDaysAhead}" style="width:60px;margin:0 6px;padding:5px 8px;font-size:12.5px" aria-label="Days ahead for due marks">
       days ahead</label>
@@ -1055,8 +1073,18 @@ function renderSettings(){
     </div>
     <div class="grp" style="border-top:1px solid var(--line);padding-top:14px">
       <div class="sub" style="margin:0">Keyboard: n new entry · ← → change day · t today · / search · Esc cancel</div>
-    </div>`;
-  document.getElementById("back").onclick = ()=>{ pendingImport=null; pendingCsv=null; csvError=false; view="day"; render(); };
+    </div>
+    ${undoChipHTML()}`;
+  bindUndo();
+  document.getElementById("back").onclick = ()=>{ pendingImport=null; pendingCsv=null; csvError=false; wipeMsg=""; view="day"; render(); };
+  document.getElementById("wipeBtn").onclick = ()=>{
+    const ym = document.getElementById("wipeMonth").value;
+    if (!ym) { wipeMsg = "Pick a month first."; render(); return; }
+    armUndo(structuredClone(s));
+    const n = deleteMonth(s, ym);
+    wipeMsg = n ? `Removed ${n} ${n===1?"entry":"entries"}.` : "Nothing in that month.";
+    save(); render();
+  };
   document.getElementById("exportJson").onclick = exportJson;
   document.getElementById("exportCsvBtn").onclick = exportCsv;
   const dis = document.getElementById("dismissBackup");
@@ -1693,7 +1721,7 @@ function exportCsv(){
 }
 
 if (typeof window === "undefined") {
-  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport };
+  module.exports = { SEED, KEY, LEGACY_KEY, migrate, ensure, calc, fmt, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, vendorItems, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, dailyNets, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth };
 } else {
   s = load();
   date = s.lastDate || todayISO();

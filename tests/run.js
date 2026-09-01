@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "..");
-const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport } = require(path.join(root, "app.js"));
+const { SEED, migrate, ensure, calc, upsertVendorFromEntry, findVendorByName, vendorDefaults, vendorStats, generateRecurring, stopRecurring, addMonths, accountBalance, monthData, runwayInfo, matchesSearch, diffStates, backupDue, moveItem, sparkData, toggleItem, goalInfo, insightsFor, redateItem, deleteVendor, deleteAccount, applyLiveRate, lagSuggestion, parseCsv, utcToLocalISO, cleanBankName, mapSlashCsv, applySlashImport, deleteMonth } = require(path.join(root, "app.js"));
 
 let failed = 0;
 const assert = (name, cond) => {
@@ -434,6 +434,21 @@ const round2 = n => Math.round(n * 100) / 100;
   assert("truncated bank name joins the full vendor", upsertVendorFromEntry(st3, cut).id === full.id && st3.vendors.length === 1);
   const ems = upsertVendorFromEntry(st3, { id: "p3", kind: "in", date: "2026-09-01", name: "EMS", usd: 10, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null });
   assert("short names never fuzzy-match", ems.id !== full.id && st3.vendors.length === 2);
+}
+
+// 22. Deleting a month removes exactly that month, and a re-import fills it again
+{
+  const st = structuredClone(SEED); st.items = []; st.vendors = []; st.settings = { procSeeded: true };
+  const mk = (id, dt) => ({ id, kind: "out", date: dt, name: "Wise", usd: 10, cadFixed: null, checked: true, accountId: null, vendorId: null, note: "", receiptUrl: "", recurringSourceId: null, importId: "tx_" + id });
+  st.items.push(mk("j1", "2026-07-05"), mk("j2", "2026-07-28"), mk("a1", "2026-08-02"));
+  st.adjust = { "2026-07-10": 50, "2026-08-15": -20 };
+  const n = deleteMonth(st, "2026-07");
+  assert("only July goes", n === 2 && st.items.length === 1 && st.items[0].id === "a1");
+  assert("July adjustments go with it", !("2026-07-10" in st.adjust) && st.adjust["2026-08-15"] === -20);
+  const HEAD2 = "Id,Date (UTC),Description,Amount,Foreign Amount,Foreign Currency,Foreign Exchange Rate,Type,Card ID,Last 4,Card Expiry Month,Card Expiry Year,Authorization Date (UTC),Card Name,Card Group Name,Virtual Account ID,Virtual Account Name,Account Type,Order Id,Reference Number,Decline Reason,Status,Memo,External Description,Receiver ID,Note";
+  const csv = [HEAD2, '"tx_j1",2026-07-05 12:00:00PM,"Wise",-10,,,,"inbound_ach_transfer",,,,,,,,"sub","Primary Account","Cash",,,,"settled",,,,'].join("\n");
+  const plan = mapSlashCsv(st, csv);
+  assert("a wiped month can be re-imported", plan.adds.length === 1 && plan.dupes === 0);
 }
 
 // 4. Offline shell: every file the service worker precaches exists on disk
